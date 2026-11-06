@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "run_id": "20261106T002043Z",
+  "run_name": "hb_qwen35_08b_single_round",
+  "dataset": "hiddenbench",
+  "protocol": "single_round",
+  "num_samples": 65,
+  "total_samples": 65,
+  "facts_per_agent": "all",
+  "option_rotation": "none",
+  "num_agent_answers": 65,
+  "template_name": "answer_only",
+  "template_text": "name: answer_only\nmode: answer_only\nempty_private_facts: \"(You have no private information for this task.)\"\nsystem: |\n  You are one member of a group that must make a decision.\n  Answer with a single letter only.\nuser: |\n  {description}\n\n  Information shared with everyone:\n  {shared_facts}\n\n  Information only you know:\n  {private_facts}\n\n  Options:\n  {options}\n\n  Reply with only the letter of the best option ({letters}).\n",
+  "reasoning": false,
+  "models": {
+    "qwen35_08b": {
+      "hf_name": "Qwen/Qwen3.5-0.8B",
+      "device": "mps",
+      "dtype": "bfloat16",
+      "model_class": "multimodal"
+    }
+  },
+  "accuracy": {
+    "per_agent_accuracy": 0.36923076923076925,
+    "num_answers": 65,
+    "num_correct": 24,
+    "parse_failures": 0,
+    "per_rotation": {
+      "0": 0.36923076923076925
+    },
+    "per_agent_index": {
+      "0": 0.36923076923076925
+    }
+  },
+  "majority": {
+    "majority_accuracy": 0.36923076923076925,
+    "num_groups": 65,
+    "ties": 0,
+    "no_answer": 0,
+    "per_rotation": {
+      "0": 0.36923076923076925
+    }
+  },
+  "memory": {
+    "device": "mps",
+    "allocated_mb": 1632.450439453125
+  },
+  "run_time_s": 74.2018442080007,
+  "trace_file": "/Users/a.ghosh.1@bham.ac.uk/Code/belief_gossip/code/results/hiddenbench_Qwen__Qwen3.5-0.8B_full_run/traces_answer_only_kall_rotnone_N65.otlp.jsonl",
+  "config": {
+    "experiment": {
+      "name": "hb_qwen35_08b_single_round",
+      "dataset": "hiddenbench",
+      "protocol": "single_round"
+    },
+    "models": {
+      "qwen35_08b": {
+        "hf_name": "Qwen/Qwen3.5-0.8B",
+        "model_class": "auto",
+        "dtype": "auto",
+        "device": "auto"
+      }
+    },
+    "agents": {
+      "facts_per_agent": "all",
+      "default_model": "qwen35_08b",
+      "overrides": {}
+    },
+    "prompts": {
+      "dir": "prompts/hiddenbench_qwen35_08b",
+      "template": "answer_only",
+      "option_rotation": "none"
+    },
+    "generation": {
+      "max_new_tokens": 4,
+      "max_new_tokens_reasoning": 256,
+      "do_sample": false,
+      "seed": 0
+    },
+    "telemetry": {
+      "enabled": true,
+      "capture_content": true,
+      "otlp_endpoint": null
+    }
+  },
+  "files": {
+    "predictions": "/Users/a.ghosh.1@bham.ac.uk/Code/belief_gossip/code/results/hiddenbench_Qwen__Qwen3.5-0.8B_full_run/predictions_answer_only_kall_rotnone_N65.json",
+    "summary": "/Users/a.ghosh.1@bham.ac.uk/Code/belief_gossip/code/results/hiddenbench_Qwen__Qwen3.5-0.8B_full_run/summary_answer_only_kall_rotnone_N65.json",
+    "prompt": "/Users/a.ghosh.1@bham.ac.uk/Code/belief_gossip/code/results/hiddenbench_Qwen__Qwen3.5-0.8B_full_run/prompt_answer_only_kall_rotnone_N65.yaml"
+  }
+}

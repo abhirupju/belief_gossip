@@ -1,0 +1,213 @@
+"""Shared fixtures: three fake tasks, a fake model backend, fake templates and an in-memory span exporter."""
+
+import copy
+import json
+import time
+from pathlib import Path
+from typing import Any, Callable
+
+import pytest
+
+from utility import hiddenbench_utils as hb
+from utility import model_utils as mu
+
+
+def make_fake_tasks() -> list[dict[str, Any]]:
+    """2 facts / 3 options; 3 facts / 3 options; 4 facts / 4 options."""
+    return [
+        {"id": 1, "name": "fake_two_facts", "description": "Pick the safest city.",
+         "shared_information": ["Shared fact one.", "Shared fact two."],
+         "hidden_information": ["fact zero of task one", "fact one of task one"],
+         "possible_answers": ["Alpha City", "Beta Town", "Gamma Hill"], "correct_answer": "Alpha City",
+         "rationale": None},
+        {"id": 2, "name": "fake_three_facts", "description": "Pick the best route.",
+         "shared_information": ["Route info."],
+         "hidden_information": ["fact zero of task two", "fact one of task two", "fact two of task two"],
+         "possible_answers": ["North", "South", "East"], "correct_answer": "South", "rationale": None},
+        {"id": 3, "name": "fake_four_facts", "description": "Pick the right number.",
+         "shared_information": ["Numbers are tricky."],
+         "hidden_information": ["fact zero of task three", "fact one of task three", "fact two of task three",
+                                "fact three of task three"],
+         "possible_answers": ["One", "Two", "Three", "Four"], "correct_answer": "Three", "rationale": None},
+    ]
+
+
+def user_text_of(messages: list[dict[str, Any]]) -> str:
+    """The user message text, whether content is a string or a list of parts."""
+    content = messages[-1]["content"]
+    return content if isinstance(content, str) else " ".join(part["text"] for part in content)
+
+
+def fake_vocab_logprobs(favoured: str | None, letters: list[str]) -> list[float]:
+    """A 128-entry 'vocabulary' (token id = ord(char)); favoured letter gets most of the mass."""
+    vector = [-20.0] * 128
+    for letter in letters:
+        vector[ord(letter)] = -0.1 if letter == favoured else (-1.0 if favoured is None else -3.0)
+    return vector
+
+
+class FakeBackend:
+    """Scripted stand-in for HFBackend; records calls and how many copies are alive."""
+
+    def __init__(self, reply_fn: Callable[[str], str], tracker: dict[str, Any], dtype: str, delays: dict[str, float]):
+        """reply_fn(user_text) -> reply; tracker counts live copies; delays[dtype] slows generate()."""
+        self.reply_fn, self.tracker, self.dtype, self.delays = reply_fn, tracker, dtype, delays
+        self.calls: list[dict[str, Any]] = []
+        tracker["live"] += 1
+        tracker["max_live"] = max(tracker["max_live"], tracker["live"])
+
+    def option_token_ids(self, letters: list[str]) -> dict[str, list[int]]:
+        """Token id of a letter is its character code."""
+        return {letter: [ord(letter)] for letter in letters}
+
+    def generate(self, messages, max_new_tokens, do_sample, option_token_ids=None, seed=0) -> mu.GenerationResult:
+        """Scripted reply; first-token log-probabilities favour the letter the reply starts with."""
+        text = user_text_of(messages)
+        self.calls.append({"kind": "generate", "user": text, "max_new_tokens": max_new_tokens})
+        time.sleep(self.delays.get(self.dtype, 0.0))
+        reply = self.reply_fn(text)
+        logprobs = None
+        if option_token_ids is not None:
+            letters = list(option_token_ids)
+            first = reply.strip()[:1].upper()
+            logprobs = mu.extract_option_logprobs(fake_vocab_logprobs(first if first in letters else None, letters),
+                                                  option_token_ids)
+        return mu.GenerationResult(reply, logprobs, len(text.split()), len(reply.split()))
+
+    def score_options(self, messages, option_token_ids) -> dict[str, float]:
+        """Uniform when the agent has no private facts, else favours the scripted reply's letter."""
+        text = user_text_of(messages)
+        self.calls.append({"kind": "score", "user": text})
+        letters = list(option_token_ids)
+        first = None if "no private information" in text else self.reply_fn(text).strip()[:1].upper()
+        return mu.extract_option_logprobs(fake_vocab_logprobs(first if first in letters else None, letters),
+                                          option_token_ids)
+
+    def release(self) -> None:
+        """Mark this copy as freed."""
+        self.tracker["live"] -= 1
+
+
+@pytest.fixture(autouse=True)
+def clean_registry():
+    """Every test starts and ends with no loaded models."""
+    mu.get_model_registry().clear()
+    yield
+    mu.get_model_registry().clear()
+
+
+@pytest.fixture
+def fake_tasks() -> list[dict[str, Any]]:
+    """Three fake HiddenBench tasks."""
+    return make_fake_tasks()
+
+
+@pytest.fixture
+def fake_data_dir(tmp_path: Path, fake_tasks) -> Path:
+    """Fake raw JSON array, converted with the real conversion and offset-index functions."""
+    data_dir = tmp_path / "data"
+    paths = hb.dataset_paths(data_dir)
+    paths["raw_dir"].mkdir(parents=True)
+    raw = paths["raw_dir"] / "hiddenbench.json"
+    raw.write_text(json.dumps(fake_tasks, indent=2), encoding="utf-8")
+    hb.convert_json_to_jsonl(raw, paths["jsonl"])
+    hb.build_offset_index(paths["jsonl"], paths["offsets"])
+    return data_dir
+
+
+@pytest.fixture
+def real_prompt_dir() -> Path:
+    """The repository's own templates."""
+    return Path(__file__).resolve().parent.parent / "prompts" / "hiddenbench_qwen35_08b"
+
+
+@pytest.fixture
+def fake_prompt_dir(tmp_path: Path) -> Path:
+    """Two small fake templates in a temporary folder."""
+    folder = tmp_path / "prompts"
+    folder.mkdir()
+    (folder / "short.yaml").write_text(
+        'name: short\nmode: answer_only\nempty_private_facts: "(none)"\nsystem: "Be brief."\n'
+        'user: "{description}\\nShared:\\n{shared_facts}\\nPrivate:\\n{private_facts}\\n'
+        'Options:\\n{options}\\nPick {letters}."\n', encoding="utf-8")
+    (folder / "think.yaml").write_text(
+        'name: think\nmode: reasoning\nanswer_marker: "Answer:"\nempty_private_facts: "(none)"\n'
+        'system: "Reason."\nuser: "{private_facts}\\n{options}"\n', encoding="utf-8")
+    return folder
+
+
+@pytest.fixture
+def fake_model_root(tmp_path: Path) -> Path:
+    """Model folders with a config.json so model_class 'auto' can be resolved."""
+    root = tmp_path / "model"
+    for name, arch in (("fake/causal-model", "FakeForCausalLM"), ("fake/second-model", "FakeForCausalLM"),
+                       ("fake/vision-model", "FakeForConditionalGeneration")):
+        folder = mu.model_dir_for(name, root)
+        folder.mkdir(parents=True)
+        (folder / "config.json").write_text(json.dumps({"architectures": [arch]}), encoding="utf-8")
+    return root
+
+
+@pytest.fixture
+def make_loader() -> Callable:
+    """Factory: make_loader(reply_fn, delays) -> (loader_fn, tracker)."""
+
+    def factory(reply_fn: Callable[[str], str] = lambda text: "A", delays: dict[str, float] | None = None):
+        tracker = {"live": 0, "max_live": 0, "loads": [], "backends": []}
+
+        def loader(model_path, device, dtype, model_class):
+            tracker["loads"].append({"path": str(model_path), "device": device, "dtype": dtype,
+                                     "model_class": model_class})
+            backend = FakeBackend(reply_fn, tracker, dtype, delays or {})
+            tracker["backends"].append(backend)
+            return backend
+
+        return loader, tracker
+
+    return factory
+
+
+@pytest.fixture
+def base_config() -> dict[str, Any]:
+    """A valid config using the fake causal model on CPU."""
+    return {
+        "experiment": {"name": "test_run", "dataset": "hiddenbench", "protocol": "single_round"},
+        "models": {"fake": {"hf_name": "fake/causal-model", "model_class": "auto", "dtype": "float32",
+                            "device": "cpu"}},
+        "agents": {"facts_per_agent": "all", "default_model": "fake", "overrides": {}},
+        "prompts": {"dir": "prompts/hiddenbench_qwen35_08b", "template": "answer_only", "option_rotation": "none"},
+        "generation": {"max_new_tokens": 4, "max_new_tokens_reasoning": 64, "do_sample": False, "seed": 0},
+        "telemetry": {"enabled": True, "capture_content": True, "otlp_endpoint": None},
+    }
+
+
+@pytest.fixture
+def make_paths(tmp_path: Path, fake_data_dir: Path, fake_model_root: Path, real_prompt_dir: Path) -> Callable:
+    """Factory for the paths dict run_experiment expects."""
+
+    def factory(prompt_dir: Path | None = None) -> dict[str, Path]:
+        return {"data_dir": fake_data_dir, "model_dir": fake_model_root, "results_dir": tmp_path / "results",
+                "prompt_dir": prompt_dir or real_prompt_dir}
+
+    return factory
+
+
+@pytest.fixture
+def span_exporter():
+    """In-memory span exporter from the OpenTelemetry SDK."""
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    return InMemorySpanExporter()
+
+
+@pytest.fixture
+def config_copy(base_config) -> Callable:
+    """Factory returning a deep copy of base_config with nested overrides applied."""
+
+    def factory(**sections: dict[str, Any]) -> dict[str, Any]:
+        config = copy.deepcopy(base_config)
+        for section, values in sections.items():
+            config[section].update(values)
+        return config
+
+    return factory

@@ -1,0 +1,17 @@
+# Model and data (needed for real runs; not needed for the unit tests)
+torch>=2.5
+torchvision            # AutoProcessor for Qwen3.5 (multimodal) builds a video processor that imports it
+transformers>=5.0      # Qwen3.5 needs a recent release; pin the exact version once it loads on the Mac
+accelerate>=1.0
+huggingface_hub>=0.30
+
+# Always needed (unit tests run with only these)
+pyyaml>=6.0
+ijson>=3.3
+pytest>=8.0
+opentelemetry-api>=1.30
+opentelemetry-sdk>=1.30
+opentelemetry-exporter-otlp-json-file==0.66b2   # beta; pinned on purpose
+
+# Optional: live export with --otlp_endpoint
+# opentelemetry-exporter-otlp-proto-http

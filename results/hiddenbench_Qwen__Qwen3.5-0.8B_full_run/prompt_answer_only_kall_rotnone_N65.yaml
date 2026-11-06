@@ -1,0 +1,19 @@
+name: answer_only
+mode: answer_only
+empty_private_facts: "(You have no private information for this task.)"
+system: |
+  You are one member of a group that must make a decision.
+  Answer with a single letter only.
+user: |
+  {description}
+
+  Information shared with everyone:
+  {shared_facts}
+
+  Information only you know:
+  {private_facts}
+
+  Options:
+  {options}
+
+  Reply with only the letter of the best option ({letters}).

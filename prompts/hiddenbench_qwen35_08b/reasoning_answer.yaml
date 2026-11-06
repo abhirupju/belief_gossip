@@ -1,0 +1,20 @@
+name: reasoning_answer
+mode: reasoning
+answer_marker: "Answer:"
+empty_private_facts: "(You have no private information for this task.)"
+system: |
+  You are one member of a group that must make a decision.
+user: |
+  {description}
+
+  Information shared with everyone:
+  {shared_facts}
+
+  Information only you know:
+  {private_facts}
+
+  Options:
+  {options}
+
+  First give your reasoning in at most five sentences, starting with "Reasoning:".
+  Then write a final line "Answer: " followed by only the letter ({letters}).

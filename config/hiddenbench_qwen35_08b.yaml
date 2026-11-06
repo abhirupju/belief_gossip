@@ -1,0 +1,33 @@
+# Mac development run: one agent with every hidden fact (HiddenBench Full Profile).
+experiment:
+  name: hb_qwen35_08b_single_round
+  dataset: hiddenbench
+  protocol: single_round    # later: debate, conformal_set_debate, ...
+
+models:                     # every model any agent may use
+  qwen35_08b:
+    hf_name: Qwen/Qwen3.5-0.8B
+    model_class: auto       # auto (from the model's config.json) | multimodal | causal
+    dtype: auto             # auto (fastest of bf16/fp16, measured once) | bfloat16 | float16 | float32
+    device: auto            # auto | mps | cuda | cpu
+
+agents:
+  facts_per_agent: all      # k: a positive integer, or "all" (one agent, every fact)
+  default_model: qwen35_08b
+  overrides: {}             # e.g. {0: qwen35_2b} gives agent 0 a different model
+
+prompts:
+  dir: prompts/hiddenbench_qwen35_08b
+  template: answer_only     # reasoning_answer when --reasoning is set
+  option_rotation: none     # none | cyclic (one answer per cyclic shift of the options)
+
+generation:
+  max_new_tokens: 4             # answer only: one token plus headroom for " A."
+  max_new_tokens_reasoning: 256 # reasoning + answer line
+  do_sample: false              # greedy, reproducible
+  seed: 0                       # used whenever sampling is on
+
+telemetry:
+  enabled: true
+  capture_content: true         # prompts and replies inside spans
+  otlp_endpoint: null           # e.g. http://localhost:4318 to also send spans live
