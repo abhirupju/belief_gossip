@@ -187,7 +187,7 @@ All large items live in project space, **`/rds/projects/g/ghoshaz-multi-agent-ll
 | torch 2.7.1, CUDA 12.6 | BEAR module `PyTorch/2.7.1-foss-2024a-CUDA-12.6.0` (`bear-apps/2024a`; EL8-icelake, so it also loads on the login nodes) |
 | transformers 5.22.2, tokenizers, huggingface_hub, the rest of `requirements.txt` | PyPI, in `$BG_STORE/venv-bearmod` (created with `--system-site-packages`) |
 | torchvision 0.22.1, accelerate | PyPI with `--no-deps`, so pip never installs a second torch |
-| regex ≥ 2025.10.22 | PyPI with `--ignore-installed`: the module's regex 2024.5.15 is too old for transformers 5.22 |
+| regex ≥ 2025.10.22, jinja2 ≥ 3.1.6 | PyPI with `--ignore-installed`: the module's regex 2024.5.15 and jinja2 3.1.4 are too old for transformers 5.22 (jinja2 fails only when a chat template is applied) |
 
 `bluebear/env.sh` loads `bluebear`, `bear-apps/2024a` and the PyTorch module, then puts the venv's `site-packages` **first** on `PYTHONPATH`. Modules put their packages on `PYTHONPATH`, which Python searches before the venv, so without this the module's older packages would win.
 

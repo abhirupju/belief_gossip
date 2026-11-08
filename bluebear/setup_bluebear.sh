@@ -34,8 +34,11 @@ pip="$BG_VENV/bin/pip"
 "$pip" install --upgrade pip
 grep -v -E '^(torch|torchvision|accelerate|transformers)([<>=! ]|$)' "$BG_CODE/requirements.txt" > "$BG_STORE/cache/requirements_bluebear.txt"
 "$pip" install -r "$BG_STORE/cache/requirements_bluebear.txt" "transformers==$tf_version"
-# pip counts the module's regex 2024.5.15 as installed; transformers checks for >= 2025.10.22 at import time.
-"$pip" install --ignore-installed --no-deps "regex>=2025.10.22"
+# The module's Python-bundle-PyPI has versions too old for transformers 5.22, but pip counts them as installed:
+#   regex 2024.5.15  (transformers checks >= 2025.10.22 at import)
+#   jinja2 3.1.4     (apply_chat_template needs >= 3.1.6; fails only when a chat template is applied)
+# Force venv copies; env.sh puts the venv ahead of the modules on PYTHONPATH so these win.
+"$pip" install --ignore-installed --no-deps "regex>=2025.10.22" "jinja2>=3.1.6"
 "$pip" install --no-deps accelerate "torchvision==$tv_version"
 
 site="$BG_VENV/lib/python3.12/site-packages"
@@ -43,9 +46,11 @@ site="$BG_VENV/lib/python3.12/site-packages"
 # transformers checks its dependency versions on import, so a too-old module package fails here, not in a job.
 "$BG_VENV/bin/python" - "$tf_version" <<'PY'
 import sys
-import accelerate, regex, torch, torchvision, transformers
-for m in (torch, transformers, torchvision, accelerate, regex):
+import accelerate, jinja2, regex, torch, torchvision, transformers
+from transformers.utils.chat_template_utils import _compile_jinja_template
+for m in (torch, transformers, torchvision, accelerate, regex, jinja2):
     print(f"{m.__name__:13s} {m.__version__:14s} {m.__file__}")
+_compile_jinja_template("{{ messages[0]['content'] }}")   # raises if jinja2 is too old for transformers
 assert torch.__file__.startswith("/rds/bear-apps/"), f"setup: torch loaded from {torch.__file__}, expected the BEAR module"
 assert transformers.__version__ == sys.argv[1], f"setup: transformers {transformers.__version__}, expected {sys.argv[1]}"
 PY
