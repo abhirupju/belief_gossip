@@ -1,6 +1,7 @@
 # Large items. No trailing slash, so the BlueBEAR symlinks (code/data -> /rds/projects/...) are ignored too.
 /data
 /model
+/results
 /logs
 /.venv
 __pycache__/
