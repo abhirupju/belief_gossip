@@ -20,6 +20,6 @@ echo "job $SLURM_JOB_ID on $(hostname) at $(date -Is)"
 echo "code commit: $(git -C "$BG_CODE" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
-"$BG_STORE/venv/bin/python" src/belief_update.py --config config/hiddenbench_test1_bluebear.yaml --device cuda "$@"
+"$BG_VENV/bin/python" src/belief_update.py --config config/hiddenbench_test1_bluebear.yaml --device cuda "$@"
 
 echo "finished at $(date -Is)"
