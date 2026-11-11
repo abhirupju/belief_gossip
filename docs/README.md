@@ -160,6 +160,30 @@ Output: a table per file (coverage, set size, share decided with its 10th/90th p
 
 **Fold size limits `spend`.** A fold of n calibration tasks gives a finite threshold only when n ≥ 1/αᵣ − 1. Too-small folds give an infinite threshold (no vetoes that round); the `inf tau` column counts them. On HiddenBench's 65 tasks, `spend` is usable for R = 1 (α = 0.1 needs `--cal_fraction 0.7`); larger R needs a larger dataset.
 
+## 6c. Belief-update protocol (C4b, variant D)
+
+C4b re-prompts each agent with the group's ruled-out options and lets the model **re-score** — new evidence, not just recalibration. It needs model passes, so it runs in two stages: build a re-scoring cache on BlueBEAR, then calibrate/evaluate offline with the same splits as C4a.
+
+**Stage 1 — build the cache (BlueBEAR, prompt-only, ~10 min/model).** For every task, agent and reachable ruled-out set (every set leaving ≥ 2 options, incl. the empty one for round 0), a prior and posterior pass under the `belief_update` template's `{group_conclusion}` line, averaged over rotations.
+
+```bash
+# on a BlueBEAR login node, from the repo root
+bash bluebear/submit_rescore.sh --model Qwen/Qwen3.5-4B --facts_per_agent 1 --option_rotation cyclic
+# writes results/<run_folder>/rescored_<stem>.json
+```
+
+Locally for a quick check: `python code/src/belief_update.py --config ... --facts_per_agent 1 --option_rotation cyclic --num_samples 2`.
+
+**Stage 2 — simulate offline, reusing the C4a machinery.**
+
+```bash
+python code/src/simulate_protocol.py --variant D \
+  --rescored  code/results/<run_folder>/rescored_<stem>.json \
+  --predictions code/results/<run_folder>/predictions_<stem>.json
+```
+
+All C4a options apply (`--score`, `--rounds`, `--schedule`, `--alpha`, `--cal_fraction`, `--shuffle_control`, `--trace_tasks`). `--lift_prior` picks the prior pass: `conclusion` (default; group conclusion in both passes, so the lift isolates the private fact in the new context) or `shared` (the empty-ruling prior — shared facts only, fixed across rounds — so the lift also reflects the agent's integration of the ruling; saved as `protocol_Dsharedprior_*`). The surviving-set wording and the lift-prior context are ablations chosen by the template; `--variant A` (default) is unchanged. Note: round 0 uses the `belief_update` template with an empty conclusion (recomputed), so all rounds share one prompt format; a no-op cache reproduces C4a exactly.
+
 ## 7. View traces (observe only)
 
 Traces are OTLP JSON lines, one trace per run: run → task → round → `invoke_agent agent-i` → `chat <model>`, with timestamped events (`prompt_rendered`, `answer_parsed`, `agent_scored`, `task_scored`). One way to view them, **not yet tested on this project**: an OpenTelemetry Collector (contrib build) with the `otlpjsonfile` receiver pointed at the trace file, exporting to Jaeger.

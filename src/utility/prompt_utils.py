@@ -9,7 +9,12 @@ import yaml
 
 def get_known_placeholders() -> set[str]:
     """Placeholders a template may use."""
-    return {"description", "shared_facts", "private_facts", "options", "letters"}
+    return {"description", "shared_facts", "private_facts", "options", "letters"} | get_optional_placeholders()
+
+
+def get_optional_placeholders() -> set[str]:
+    """Placeholders a template may use but that round-0 single-shot templates need not provide (multi-round only)."""
+    return {"group_conclusion"}
 
 
 def get_template_modes() -> set[str]:
@@ -73,6 +78,16 @@ def validate_template(template: dict[str, Any]) -> None:
         assert needed in get_placeholders(template["user"]), (
             f"validate_template: template {template['name']} must use {{{needed}}} in its user text"
         )
+    if "group_conclusion" in used:
+        for key in ("group_conclusion", "empty_group_conclusion"):
+            assert isinstance(template.get(key), str) and template[key].strip(), (
+                f"validate_template: template {template['name']} uses {{group_conclusion}} so it needs non-empty {key} text"
+            )
+        basis = template.get("group_conclusion_basis", "ruled_out")
+        assert basis in ("ruled_out", "surviving"), (
+            f"validate_template: template {template['name']} has group_conclusion_basis {basis!r}; "
+            f"use 'ruled_out' or 'surviving'"
+        )
 
 
 def check_template_mode(template: dict[str, Any], reasoning: bool) -> None:
@@ -97,7 +112,8 @@ def format_letters(letters: list[str]) -> str:
 
 def render_prompt(template: dict[str, Any], fields: dict[str, Any]) -> tuple[str, str]:
     """Fill the template; returns (system_text, user_text). No private facts -> empty_private_facts text."""
-    missing = get_known_placeholders() - set(fields)
+    required = get_known_placeholders() - get_optional_placeholders()
+    missing = required - set(fields)
     assert not missing, f"render_prompt: fields are missing {sorted(missing)}"
     assert len(fields["options"]) == len(fields["letters"]), (
         f"render_prompt: {len(fields['options'])} options but {len(fields['letters'])} letters"
@@ -110,6 +126,13 @@ def render_prompt(template: dict[str, Any], fields: dict[str, Any]) -> tuple[str
         "options": "\n".join(f"{l}. {o}" for l, o in zip(fields["letters"], fields["options"])),
         "letters": format_letters(fields["letters"]),
     }
+    used = get_placeholders(template["system"]) | get_placeholders(template["user"])
+    if "group_conclusion" in used:
+        basis = template.get("group_conclusion_basis", "ruled_out")
+        assert basis in fields, f"render_prompt: template uses {{group_conclusion}} but fields lack {basis!r}"
+        gc_letters = fields[basis]
+        values["group_conclusion"] = (template["group_conclusion"].format(letters=", ".join(gc_letters))
+                                      if gc_letters else template["empty_group_conclusion"])
     return template["system"].format(**values).strip(), template["user"].format(**values).strip()
 
 

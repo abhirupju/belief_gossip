@@ -36,6 +36,38 @@ def get_schedules() -> list[str]:
     return ["global", "spend"]
 
 
+def load_rescore_cache(path: Any) -> Any:
+    """Read a belief_update cache (variant D) and return a lookup fn(task_index, agent_index, ruling) -> {prior, posterior}."""
+    import json
+    from pathlib import Path
+    data = json.loads(Path(path).read_text(encoding="utf-8"))["by_task"]
+    cache = {int(t): {int(a): rulings for a, rulings in agents.items()} for t, agents in data.items()}
+
+    def lookup(task_index: int, agent_index: int, ruling: str) -> dict[str, dict[str, float]]:
+        """Fetch one re-scored prior/posterior; a missing key is an error, never a silent fallback."""
+        assert task_index in cache, f"rescore lookup: task {task_index} not in the cache"
+        assert agent_index in cache[task_index], f"rescore lookup: agent {agent_index} not cached for task {task_index}"
+        rulings = cache[task_index][agent_index]
+        assert ruling in rulings, (
+            f"rescore lookup: ruling {ruling!r} not cached for task {task_index} agent {agent_index} "
+            f"(have {sorted(rulings)})")
+        return rulings[ruling]
+
+    return lookup
+
+
+def shared_prior_rescore(base: Any) -> Any:
+    """Lift-prior ablation: the prior comes from the empty ruling (shared facts only, the round-0 context),
+    while the posterior still carries the current ruling. The group conclusion then no longer cancels out of
+    the lift, so it also measures the agent's own integration of the ruling."""
+
+    def lookup(task_index: int, agent_index: int, ruling: str) -> dict[str, dict[str, float]]:
+        return {"prior": base(task_index, agent_index, "")["prior"],
+                "posterior": base(task_index, agent_index, ruling)["posterior"]}
+
+    return lookup
+
+
 def check_subset(agent: dict[str, Any], S: list[str]) -> None:
     """Assert S is a non-empty list of distinct options the agent has scores for."""
     assert S, "check_subset: the surviving set S is empty"
@@ -76,8 +108,30 @@ def agent_vetoes(agent: dict[str, Any], S: list[str], score: str, tau: float) ->
     return [y for y in S if scores[y] > tau]
 
 
+def ruled_out_key(letters: list[str], S: list[str]) -> str:
+    """Canonical cache key for the options ruled out when S survives (letters minus S, sorted, comma-joined)."""
+    return ",".join(sorted(set(letters) - set(S)))
+
+
+def rescored_agent(view: dict[str, Any], agent: dict[str, Any], S: list[str], rescore: Any) -> dict[str, Any]:
+    """Variant D: the agent's prior/posterior re-scored under 'the group ruled out (letters - S)', from the cache."""
+    entry = rescore(view["task_index"], agent["agent_index"], ruled_out_key(view["letters"], S))
+    prior, posterior = entry["prior"], entry["posterior"]
+    return {"agent_index": agent["agent_index"], "prior": prior, "posterior": posterior,
+            "lift": {y: posterior[y] - prior[y] for y in prior}}
+
+
+def agents_for_round(view: dict[str, Any], S: list[str], variant: str, rescore: Any) -> list[dict[str, Any]]:
+    """The agent score dicts to use this round: frozen round-0 scores (A) or cache re-scored under S (D)."""
+    assert variant in ("A", "D"), f"agents_for_round: variant {variant!r} must be 'A' or 'D'"
+    if variant == "A":
+        return view["agents"]
+    assert rescore is not None, "agents_for_round: variant D needs a rescore lookup"
+    return [rescored_agent(view, agent, S, rescore) for agent in view["agents"]]
+
+
 def run_protocol(view: dict[str, Any], score: str, thresholds: list[float],
-                 stop_when_unchanged: bool = True) -> dict[str, Any]:
+                 variant: str = "A", rescore: Any = None, stop_when_unchanged: bool = True) -> dict[str, Any]:
     """Run rounds 0..R (R = len(thresholds) - 1) on one task; never reads the true answer."""
     assert thresholds, "run_protocol: need at least one threshold (round 0)"
     assert view["agents"], f"run_protocol: task {view.get('task_index')} has no agents"
@@ -88,7 +142,8 @@ def run_protocol(view: dict[str, Any], score: str, thresholds: list[float],
     bits_up = bits_down = 0
     stop = "max_rounds"
     for r, tau in enumerate(thresholds):
-        round_vetoes = [agent_vetoes(agent, S, score, tau) for agent in view["agents"]]
+        ragents = agents_for_round(view, S, variant, rescore)
+        round_vetoes = [agent_vetoes(agent, S, score, tau) for agent in ragents]
         vetoed = {y for agent_veto in round_vetoes for y in agent_veto}
         new_S = [y for y in S if y not in vetoed]
         bits_up += n_agents * len(S)
@@ -110,22 +165,23 @@ def run_protocol(view: dict[str, Any], score: str, thresholds: list[float],
             "rounds_used": len(sets), "bits_up": bits_up, "bits_down": bits_down, "final_set": sets[-1]}
 
 
-def truth_score(view: dict[str, Any], S: list[str], score: str) -> float:
+def truth_score(view: dict[str, Any], S: list[str], score: str, variant: str = "A", rescore: Any = None) -> float:
     """Largest score any agent gives the true answer within S (the truth is vetoed when this exceeds tau)."""
     truth = view["true_letter"]
     assert truth in S, f"truth_score: true answer {truth} is not in S {S}"
-    return max(restricted_scores(agent, S, score)[truth] for agent in view["agents"])
+    return max(restricted_scores(agent, S, score)[truth] for agent in agents_for_round(view, S, variant, rescore))
 
 
-def truth_score_at_round(view: dict[str, Any], score: str, earlier_thresholds: list[float]) -> float:
+def truth_score_at_round(view: dict[str, Any], score: str, earlier_thresholds: list[float],
+                         variant: str = "A", rescore: Any = None) -> float:
     """Truth score in round r = len(earlier_thresholds), after rounds 0..r-1; -inf when the truth is not at risk."""
     if not earlier_thresholds:
-        return truth_score(view, list(view["letters"]), score)
-    trajectory = run_protocol(view, score, earlier_thresholds, stop_when_unchanged=False)
+        return truth_score(view, list(view["letters"]), score, variant, rescore)
+    trajectory = run_protocol(view, score, earlier_thresholds, variant, rescore, stop_when_unchanged=False)
     S = trajectory["final_set"]
     if trajectory["stop"] != "max_rounds" or view["true_letter"] not in S:
         return -math.inf
-    return truth_score(view, S, score)
+    return truth_score(view, S, score, variant, rescore)
 
 
 def floor_threshold(tau: float, score: str) -> float:
@@ -133,10 +189,11 @@ def floor_threshold(tau: float, score: str) -> float:
     return max(tau, 0.0) if score == "margin" else tau
 
 
-def calibrate_global(calibration: list[dict[str, Any]], score: str, alpha: float, rounds: int) -> list[float]:
+def calibrate_global(calibration: list[dict[str, Any]], score: str, alpha: float, rounds: int,
+                     variant: str = "A", rescore: Any = None) -> list[float]:
     """One threshold for every round: the joint conformal quantile of the round-0 truth score."""
     assert rounds >= 0, f"calibrate_global: rounds must be >= 0, got {rounds}"
-    tau = conformal_quantile([truth_score(v, list(v["letters"]), score) for v in calibration], alpha)
+    tau = conformal_quantile([truth_score(v, list(v["letters"]), score, variant, rescore) for v in calibration], alpha)
     return [floor_threshold(tau, score)] * (rounds + 1)
 
 
@@ -165,23 +222,24 @@ def make_folds(calibration: list[dict[str, Any]], n_folds: int) -> list[list[dic
     return folds
 
 
-def calibrate_spend(calibration: list[dict[str, Any]], score: str, alphas: list[float]) -> list[float]:
+def calibrate_spend(calibration: list[dict[str, Any]], score: str, alphas: list[float],
+                    variant: str = "A", rescore: Any = None) -> list[float]:
     """tau_r from fold r at level alpha_r, with tau_0 .. tau_{r-1} fixed (alpha spending + union bound)."""
     folds = make_folds(calibration, len(alphas))
     thresholds: list[float] = []
     for fold, alpha_r in zip(folds, alphas):
-        values = [truth_score_at_round(v, score, thresholds) for v in fold]
+        values = [truth_score_at_round(v, score, thresholds, variant, rescore) for v in fold]
         thresholds.append(floor_threshold(conformal_quantile(values, alpha_r), score))
     return thresholds
 
 
 def calibrate(calibration: list[dict[str, Any]], score: str, schedule: str, alpha: float, rounds: int,
-              round0_share: float | None = None) -> list[float]:
+              round0_share: float | None = None, variant: str = "A", rescore: Any = None) -> list[float]:
     """Thresholds [tau_0 .. tau_R] for the chosen schedule."""
     assert schedule in get_schedules(), f"calibrate: unknown schedule {schedule!r}; use {get_schedules()}"
     if schedule == "global":
-        return calibrate_global(calibration, score, alpha, rounds)
-    return calibrate_spend(calibration, score, split_alpha(alpha, rounds, round0_share))
+        return calibrate_global(calibration, score, alpha, rounds, variant, rescore)
+    return calibrate_spend(calibration, score, split_alpha(alpha, rounds, round0_share), variant, rescore)
 
 
 def first_miss_round(view: dict[str, Any], trajectory: dict[str, Any]) -> int | None:
@@ -192,14 +250,18 @@ def first_miss_round(view: dict[str, Any], trajectory: dict[str, Any]) -> int | 
     return None
 
 
-def evaluate_protocol(test: list[dict[str, Any]], score: str, thresholds: list[float]) -> tuple[dict[str, float], list[dict[str, Any]]]:
+def evaluate_protocol(test: list[dict[str, Any]], score: str, thresholds: list[float],
+                      variant: str = "A", rescore: Any = None) -> tuple[dict[str, float], list[dict[str, Any]]]:
     """Run the protocol on test tasks; return the metrics and the trajectories (with coverage added)."""
-    trajectories = [run_protocol(view, score, thresholds) for view in test]
+    trajectories = [run_protocol(view, score, thresholds, variant, rescore) for view in test]
     metrics = evaluate_sets(test, [t["final_set"] for t in trajectories])
     rounds = len(thresholds)
     metrics["mean_rounds"] = sum(t["rounds_used"] for t in trajectories) / len(trajectories)
     metrics["mean_bits_up"] = sum(t["bits_up"] for t in trajectories) / len(trajectories)
     metrics["mean_bits_down"] = sum(t["bits_down"] for t in trajectories) / len(trajectories)
+    # Variant D re-prompts the model each round the task is still active: 1 shared prior pass + one posterior per agent.
+    passes = [(t["rounds_used"] * (1 + len(v["agents"])) if variant == "D" else 0) for v, t in zip(test, trajectories)]
+    metrics["mean_model_passes"] = sum(passes) / len(passes)
     for r in range(rounds):
         metrics[f"decided_round_{r}"] = sum(t["stop"] == "decided" and t["rounds_used"] == r + 1
                                             for t in trajectories) / len(trajectories)
@@ -222,12 +284,8 @@ def split_tasks(n_tasks: int, cal_fraction: float, rng: random.Random) -> tuple[
     return calibration, test
 
 
-def shuffle_agents(views: list[dict[str, Any]], seed: int) -> list[dict[str, Any]]:
-    """Reassign each task's agents to a different task with the same options, keeping its true answer and options.
-
-    A control: the evidence an agent brings no longer belongs to the task it lands on, so coverage must still hold
-    (calibration adapts) but the decisive rate must fall toward the null level if the real gains came from the facts.
-    """
+def shuffle_source_map(views: list[dict[str, Any]], seed: int) -> list[int]:
+    """For each task, the index of the same-option task whose evidence it will borrow (a derangement within groups)."""
     rng = random.Random(seed)
     groups: dict[tuple[str, ...], list[int]] = {}
     for i, view in enumerate(views):
@@ -241,33 +299,56 @@ def shuffle_agents(views: list[dict[str, Any]], seed: int) -> list[dict[str, Any
                 rng.shuffle(donors)
         for target, donor in zip(idx, donors):
             source_of[target] = donor
+    return source_of
+
+
+def shuffle_agents(views: list[dict[str, Any]], seed: int) -> list[dict[str, Any]]:
+    """Reassign each task's agents to a different task with the same options, keeping its true answer and options.
+
+    A control: the evidence an agent brings no longer belongs to the task it lands on, so coverage must still hold
+    (calibration adapts) but the decisive rate must fall toward the null level if the real gains came from the facts.
+    """
+    source_of = shuffle_source_map(views, seed)
     return [{**views[target], "agents": views[source_of[target]]["agents"]} for target in range(len(views))]
+
+
+def remap_rescore(rescore: Any, views: list[dict[str, Any]], source_of: list[int]) -> Any:
+    """Variant-D control: route each task's cache lookups to the task it borrowed its agents from."""
+    index_of = {view["task_index"]: i for i, view in enumerate(views)}
+    origin = {view["task_index"]: views[source_of[index_of[view["task_index"]]]]["task_index"] for view in views}
+    return lambda task_index, agent_index, ruling: rescore(origin[task_index], agent_index, ruling)
 
 
 def run_multiround(views: list[dict[str, Any]], score: str, schedule: str, alpha: float, rounds: int,
                    cal_fraction: float = 0.5, round0_share: float | None = None,
-                   n_splits: int = 200, seed: int = 0, shuffle: bool = False) -> dict[str, Any]:
+                   n_splits: int = 200, seed: int = 0, shuffle: bool = False,
+                   variant: str = "A", rescore: Any = None) -> dict[str, Any]:
     """Calibrate and test the protocol over random task splits; metrics as mean and 10th/90th percentiles."""
     assert len(views) >= 4, f"run_multiround: need at least 4 tasks, got {len(views)}"
     assert score in get_protocol_scores(), f"run_multiround: unknown score {score!r}"
+    assert variant in ("A", "D"), f"run_multiround: variant {variant!r} must be 'A' or 'D'"
+    assert variant == "A" or rescore is not None, "run_multiround: variant D needs a rescore lookup"
     assert score == "margin" or rounds == 0, (
         f"run_multiround: score {score!r} has no coverage argument beyond round 0; use rounds 0 or score 'margin'")
     if shuffle:
-        views = shuffle_agents(views, seed)
+        source_of = shuffle_source_map(views, seed)
+        if variant == "D":
+            rescore = remap_rescore(rescore, views, source_of)
+        views = [{**views[t], "agents": views[source_of[t]]["agents"]} for t in range(len(views))]
     rng = random.Random(seed)
     per_split, kept_trajectories, thresholds_seen = [], [], []
     for split in range(n_splits):
         cal_idx, test_idx = split_tasks(len(views), cal_fraction, rng)
         calibration, test = [views[i] for i in cal_idx], [views[i] for i in test_idx]
-        thresholds = calibrate(calibration, score, schedule, alpha, rounds, round0_share)
-        metrics, trajectories = evaluate_protocol(test, score, thresholds)
+        thresholds = calibrate(calibration, score, schedule, alpha, rounds, round0_share, variant, rescore)
+        metrics, trajectories = evaluate_protocol(test, score, thresholds, variant, rescore)
         metrics["infinite_threshold_rounds"] = float(sum(math.isinf(t) for t in thresholds))
         per_split.append(metrics)
         thresholds_seen.append(thresholds)
         if split == 0:
             kept_trajectories = trajectories
     n_cal = len(split_tasks(len(views), cal_fraction, random.Random(0))[0])
-    return {"variant": "A", "score": score, "schedule": schedule, "alpha": alpha, "rounds": rounds,
+    return {"variant": variant, "score": score, "schedule": schedule, "alpha": alpha, "rounds": rounds,
             "cal_fraction": cal_fraction, "round0_share": round0_share, "shuffle": shuffle,
             "n_splits": n_splits, "seed": seed,
             "n_calibration": n_cal, "fold_size": n_cal // (rounds + 1) if schedule == "spend" else n_cal,

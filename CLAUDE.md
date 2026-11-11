@@ -47,4 +47,5 @@ Slurm account: `ghoshaz-multi-agent-llms` (`BG_ACCOUNT` in `env.sh`; `submit.sh`
 - Run guide and all options: `docs/README.md`
 - Analysis: `python src/analyze.py --predictions <predictions file>`
 - Multi-round protocol (C4a): `python src/simulate_protocol.py --predictions <k1 predictions file>`
+- Belief update (C4b): `python src/belief_update.py` (cache, BlueBEAR) then `src/simulate_protocol.py --variant D --rescored <cache>`
 - Design plan (Claude doc): "HiddenBench Agent Codebase — Implementation Plan"

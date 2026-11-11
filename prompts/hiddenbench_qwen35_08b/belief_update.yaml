@@ -1,0 +1,24 @@
+name: belief_update
+mode: answer_only
+empty_private_facts: "(You have no private information for this task.)"
+group_conclusion_basis: ruled_out
+group_conclusion: "The group has discussed and ruled out these options: {letters}. Choose only from the options that remain."
+empty_group_conclusion: "The group has not ruled out any option yet."
+system: |
+  You are one member of a group that must make a decision.
+  Answer with a single letter only.
+user: |
+  {description}
+
+  Information shared with everyone:
+  {shared_facts}
+
+  Information only you know:
+  {private_facts}
+
+  {group_conclusion}
+
+  Options:
+  {options}
+
+  Reply with only the letter of the best option ({letters}).
