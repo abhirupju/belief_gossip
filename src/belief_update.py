@@ -83,8 +83,19 @@ def rescore_agent_ruling(handle: ModelHandle, template: dict[str, Any], adapter:
     return normalize(average_passes(passes))
 
 
+def template_for_ruling(ruled_out: tuple[str, ...], round0_template: dict[str, Any],
+                        ruling_template: dict[str, Any]) -> dict[str, Any]:
+    """The empty ruling (round 0) uses the plain single-shot template; any actual ruling uses the belief-update one.
+
+    This keeps round 0 byte-identical to the one-shot run, so its scores match the saved predictions and the
+    group-conclusion line is added only when it carries real information.
+    """
+    return round0_template if not ruled_out else ruling_template
+
+
 def build_rescore_cache(config: dict[str, Any], adapter: dict[str, Callable], handles: dict[str, ModelHandle],
-                        template: dict[str, Any], data_dir: Path, num_samples: int) -> dict[str, Any]:
+                        round0_template: dict[str, Any], ruling_template: dict[str, Any],
+                        data_dir: Path, num_samples: int) -> dict[str, Any]:
     """Loop tasks x agents x reachable rulings; the prior (no private fact) is computed once per task and ruling."""
     rotation_mode = config["prompts"]["option_rotation"]
     facts_per_agent = config["agents"]["facts_per_agent"]
@@ -99,13 +110,14 @@ def build_rescore_cache(config: dict[str, Any], adapter: dict[str, Callable], ha
         blocks = partition_facts(adapter["num_private_facts"](sample), facts_per_agent)
         rulings = reachable_rulings(letters)
         handle = handles[get_model_key_for_agent(config, 0)]
-        shared_prior = {ruling_key(r): rescore_agent_ruling(handle, template, adapter, sample, [], r, rotations,
-                                                            "prior") for r in rulings}
+        shared_prior = {ruling_key(r): rescore_agent_ruling(handle, template_for_ruling(r, round0_template,
+                        ruling_template), adapter, sample, [], r, rotations, "prior") for r in rulings}
         task_cache: dict[str, Any] = {}
         for agent_index, block in enumerate(blocks):
             agent_cache = {}
             for r in rulings:
-                posterior = rescore_agent_ruling(handle, template, adapter, sample, block, r, rotations, "posterior")
+                tmpl = template_for_ruling(r, round0_template, ruling_template)
+                posterior = rescore_agent_ruling(handle, tmpl, adapter, sample, block, r, rotations, "posterior")
                 agent_cache[ruling_key(r)] = {"prior": shared_prior[ruling_key(r)], "posterior": posterior}
             task_cache[str(agent_index)] = agent_cache
         by_task[str(task_index)] = task_cache
@@ -118,12 +130,13 @@ def cache_stem(config: dict[str, Any], num_samples: int) -> str:
     return f"{config['prompts']['template']}_k{k}_rot{config['prompts']['option_rotation']}_N{num_samples}"
 
 
-def save_rescore_cache(by_task: dict[str, Any], config: dict[str, Any], template: dict[str, Any],
-                       run_dir: Path, stem: str) -> Path:
+def save_rescore_cache(by_task: dict[str, Any], config: dict[str, Any], round0_template: dict[str, Any],
+                       ruling_template: dict[str, Any], run_dir: Path, stem: str) -> Path:
     """Write rescored_<stem>.json into the run folder; returns the path."""
     run_dir.mkdir(parents=True, exist_ok=True)
     target = run_dir / f"rescored_{stem}.json"
-    payload = {"variant": "D", "template_name": template["name"], "template_text": template["raw_text"],
+    payload = {"variant": "D", "round0_template": round0_template["name"], "ruling_template": ruling_template["name"],
+               "round0_template_text": round0_template["raw_text"], "ruling_template_text": ruling_template["raw_text"],
                "option_rotation": config["prompts"]["option_rotation"], "by_task": by_task}
     target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return target
@@ -139,7 +152,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--facts_per_agent", type=parse_facts_per_agent, default=None, help="k, or 'all'")
     parser.add_argument("--option_rotation", choices=["none", "cyclic"], default=None)
     parser.add_argument("--prompt_dir", default=None, help="folder of prompt templates (relative to code/)")
-    parser.add_argument("--prompt_template", default="belief_update", help="belief-update template name")
+    parser.add_argument("--prompt_template", default="belief_update",
+                        help="template used once options have been ruled out (rounds >= 1)")
+    parser.add_argument("--round0_template", default="answer_only",
+                        help="template for the empty ruling (round 0); 'answer_only' keeps round 0 identical to the "
+                             "one-shot run, or pass the ruling template to score round 0 with an empty conclusion")
     parser.add_argument("--dtype", choices=["auto", "bfloat16", "float16", "float32"], default=None)
     parser.add_argument("--data_dir", default="data")
     parser.add_argument("--model_dir", default="model")
@@ -188,14 +205,15 @@ def main(argv: list[str] | None = None, loader_fn: Callable | None = None) -> Pa
     total = adapter["num_samples"](paths["data_dir"])
     n = total if args.num_samples is None else args.num_samples
     assert type(n) is int and 1 <= n <= total, f"belief_update: num_samples {n!r} must be between 1 and {total}"
-    template = load_template(prompt_dir, config["prompts"]["template"])
+    ruling_template = load_template(prompt_dir, config["prompts"]["template"])
+    round0_template = load_template(prompt_dir, args.round0_template)
     handles = load_all_models(config, paths["model_dir"], loader_fn, True)
     if args.download_only:
         return None
-    by_task = build_rescore_cache(config, adapter, handles, template, paths["data_dir"], n)
+    by_task = build_rescore_cache(config, adapter, handles, round0_template, ruling_template, paths["data_dir"], n)
     default_model = config["models"][config["agents"]["default_model"]]["hf_name"]
     run_dir = get_run_dir(paths["results_dir"], config["experiment"]["dataset"], default_model, n, total)
-    path = save_rescore_cache(by_task, config, template, run_dir, cache_stem(config, n))
+    path = save_rescore_cache(by_task, config, round0_template, ruling_template, run_dir, cache_stem(config, n))
     print(f"Saved {path}  ({n} tasks)")
     return path
 

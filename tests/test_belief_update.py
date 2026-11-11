@@ -15,6 +15,10 @@ def load_bu_template():
     return pu.load_template("prompts/hiddenbench_qwen35_08b", "belief_update")
 
 
+def load_round0_template():
+    return pu.load_template("prompts/hiddenbench_qwen35_08b", "answer_only")
+
+
 def logs(probs: dict[str, float]) -> dict[str, float]:
     return {k: math.log(v) for k, v in probs.items()}
 
@@ -46,6 +50,13 @@ def test_existing_templates_still_render_without_a_ruling():
 
 
 # ---------- reachable rulings ----------
+
+def test_empty_ruling_uses_round0_template_actual_ruling_uses_belief_update():
+    r0, ruling = load_round0_template(), load_bu_template()
+    assert bu.template_for_ruling((), r0, ruling)["name"] == "answer_only"
+    assert bu.template_for_ruling(("B",), r0, ruling)["name"] == "belief_update"
+    assert bu.template_for_ruling(("A", "C"), r0, ruling)["name"] == "belief_update"
+
 
 def test_reachable_rulings_leave_at_least_two_options():
     assert bu.reachable_rulings(["A", "B", "C"]) == [(), ("A",), ("B",), ("C",)]
@@ -80,7 +91,7 @@ def build_small_cache(make_loader, config_copy, fake_data_dir, fake_model_root, 
     handles = load_all_models(config, fake_model_root, loader, False)
     template = load_bu_template()
     n = adapter["num_samples"](fake_data_dir)
-    by_task = bu.build_rescore_cache(config, adapter, handles, template, fake_data_dir, n)
+    by_task = bu.build_rescore_cache(config, adapter, handles, load_round0_template(), template, fake_data_dir, n)
     return by_task, adapter, fake_data_dir, n
 
 
@@ -127,7 +138,7 @@ def test_prior_pass_is_shared_not_repeated_per_agent(make_loader, config_copy, f
     adapter = get_dataset_adapter("hiddenbench")
     handles = load_all_models(config, fake_model_root, loader, False)
     n = adapter["num_samples"](fake_data_dir)
-    bu.build_rescore_cache(config, adapter, handles, load_bu_template(), fake_data_dir, n)
+    bu.build_rescore_cache(config, adapter, handles, load_round0_template(), load_bu_template(), fake_data_dir, n)
     passes = sum(len(c["user"].split()) >= 0 for b in tracker["backends"] for c in b.calls if c["kind"] == "score")
     expected = 0
     for t in range(n):
@@ -148,7 +159,7 @@ def test_overrides_are_rejected_because_the_prior_is_shared(make_loader, config_
     adapter = get_dataset_adapter("hiddenbench")
     handles = load_all_models(config, fake_model_root, loader, False)
     with pytest.raises(AssertionError, match="overrides must be empty"):
-        bu.build_rescore_cache(config, adapter, handles, load_bu_template(), fake_data_dir,
+        bu.build_rescore_cache(config, adapter, handles, load_round0_template(), load_bu_template(), fake_data_dir,
                                adapter["num_samples"](fake_data_dir))
 
 

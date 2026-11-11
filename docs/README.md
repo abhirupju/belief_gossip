@@ -174,6 +174,8 @@ bash bluebear/submit_rescore.sh --model Qwen/Qwen3.5-4B --facts_per_agent 1 --op
 
 Locally for a quick check: `python code/src/belief_update.py --config ... --facts_per_agent 1 --option_rotation cyclic --num_samples 2`.
 
+Round 0 (empty ruling) is scored with the `--round0_template` (default `answer_only`), so it is byte-identical to the one-shot C4a run and its Σ-lift fusion stays at full strength; the `belief_update` template's group-conclusion line is added only from round 1, when there is an actual ruling to state. Pass `--round0_template belief_update` to instead score round 0 with an empty conclusion.
+
 **Stage 2 — simulate offline, reusing the C4a machinery.**
 
 ```bash
