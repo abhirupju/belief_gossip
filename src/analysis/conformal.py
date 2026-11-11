@@ -24,6 +24,15 @@ def score_lift(agent: dict[str, Any], letter: str) -> float:
     return -agent["lift"][letter]
 
 
+def score_margin(agent: dict[str, Any], letter: str) -> float:
+    """Nonconformity = the agent's best lift minus this option's lift (0 for its top option).
+
+    Cancels the offset that renormalisation adds to every option when the prior's favourite collapses,
+    so the set never empties and depends on the gap to the best option rather than raw lift.
+    """
+    return max(agent["lift"].values()) - agent["lift"][letter]
+
+
 def score_lac(agent: dict[str, Any], letter: str) -> float:
     """Nonconformity = 1 - posterior probability (LAC)."""
     return 1.0 - math.exp(agent["posterior"][letter])
@@ -31,7 +40,7 @@ def score_lac(agent: dict[str, Any], letter: str) -> float:
 
 def get_score_functions() -> dict[str, Callable[[dict[str, Any], str], float]]:
     """Available nonconformity scores by name."""
-    return {"lift": score_lift, "lac": score_lac}
+    return {"lift": score_lift, "margin": score_margin, "lac": score_lac}
 
 
 def conformal_quantile(values: list[float], alpha: float) -> float:

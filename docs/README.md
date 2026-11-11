@@ -101,7 +101,7 @@ It prints tables and saves `analysis_<stem>.json` next to the predictions file. 
 |---|---|---|
 | `--alpha` | `0.1 0.2` | Target miss rates for the conformal sets |
 | `--k` | `1 2` | Quorum sizes (1 = intersection; k only matters with several agents per task) |
-| `--score` | `lift lac` | Nonconformity scores: `lift` (−evidence-lift) or `lac` (1 − posterior probability) |
+| `--score` | `lift margin lac` | Nonconformity scores: `lift` (−evidence-lift), `margin` (agent's best lift − the option's lift; recommended) or `lac` (1 − posterior probability) |
 | `--conformal_rule` | `joint markov` | Threshold rule (see below) |
 | `--splits` | 200 | Random 50/50 calibration/test splits over tasks |
 | `--bootstrap` | 5000 | Resamples for the 95% intervals |
@@ -133,6 +133,32 @@ With one agent per task, `prior_plus_lift` and `posterior_sum` both equal the ag
 - Reported per setting: coverage, mean set size, singleton rate and singleton accuracy, as the mean and the 10th/90th percentiles over splits.
 
 With 65 tasks, coverage varies by roughly ±5–10% between splits. Read the analysis as a feasibility signal, not a paper result.
+
+## 6b. Simulate the multi-round protocol (C4a, variant A)
+
+Offline, on the saved scores of a one-fact-per-agent run (`k1`); no model is loaded. About 4 s per file on the M4.
+
+```bash
+python code/src/simulate_protocol.py --predictions code/results/<run_folder>/predictions_answer_only_k1_rotcyclic_N65.json
+```
+
+Each round, the hub broadcasts the surviving options S; every agent renormalises its own saved prior and posterior over S, scores the options in S, and vetoes those above the round's threshold; the hub keeps the options no agent vetoed. It stops when one option is left (decided), none is left (empty, counted as a miss), nothing changed and no later round is stricter, or after round R.
+
+| Option | Default | What it does |
+|---|---|---|
+| `--score` | `margin lift` | `margin` (best lift in S − the option's lift) or `lift` (−lift over S). `lift` runs at R = 0 only: it has no coverage argument for later rounds |
+| `--rounds` | `0 1 2 3` | Extra rounds R after round 0 (R = 0 is the one-round result of `analyze.py`, reproduced exactly at `--cal_fraction 0.5`) |
+| `--schedule` | `global spend` | `global`: one threshold for every round (under margin, later rounds then never change the set). `spend`: α split over rounds, one disjoint calibration fold per round, union bound (runs for R ≥ 1) |
+| `--round0_share` | `0.7` | `spend` also runs with this share of α in round 0 (equal shares always run) |
+| `--alpha` | `0.1 0.2` | Target miss rate for the whole protocol |
+| `--cal_fraction` | `0.5 0.7` | Share of tasks used to calibrate in each random split |
+| `--splits`, `--seed` | `200`, `0` | Random calibration/test splits |
+| `--trace_tasks n` | `0` | Print the round-by-round sets and vetoes of n test tasks (split 0) for checking by hand |
+| `--no_save` | off | Print only |
+
+Output: a table per file (coverage, set size, share decided with its 10th/90th percentile over splits, accuracy when decided, empty rate, rounds, uplink bits) and `protocol_A_<stem>.json` next to the predictions file (every configuration's metrics, thresholds and split-0 trajectories).
+
+**Fold size limits `spend`.** A fold of n calibration tasks gives a finite threshold only when n ≥ 1/αᵣ − 1. Too-small folds give an infinite threshold (no vetoes that round); the `inf tau` column counts them. On HiddenBench's 65 tasks, `spend` is usable for R = 1 (α = 0.1 needs `--cal_fraction 0.7`); larger R needs a larger dataset.
 
 ## 7. View traces (observe only)
 

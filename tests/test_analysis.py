@@ -159,3 +159,18 @@ def test_report_end_to_end(tmp_path):
     printed = analyze_cli.main(["--predictions", str(path), "--alpha", "0.2", "--k", "1", "--splits", "10",
                                 "--bootstrap", "200", "--no_save"])
     assert printed[0]["num_records"] == 72
+
+
+def test_margin_score_ignores_a_shared_offset_and_never_empties():
+    agent = {"lift": {"A": 2.0, "B": 1.5, "C": -3.0}}
+    shifted = {"lift": {y: v + 5.0 for y, v in agent["lift"].items()}}
+    for y in "ABC":
+        assert cf.score_margin(agent, y) == cf.score_margin(shifted, y)
+    assert cf.score_margin(agent, "A") == 0.0
+    view = {"true_letter": "B", "letters": ["A", "B", "C"], "agents": [agent]}
+    assert cf.quorum_set(view, cf.score_margin, [0.0], 1) == ["A"]
+
+
+def test_margin_rule_reaches_target_coverage():
+    result = cf.run_conformal(synthetic_views(), "margin", "joint", 0.2, 1, n_splits=100, seed=0)
+    assert result["metrics"]["coverage"]["mean"] >= 1 - 0.2 - 0.03

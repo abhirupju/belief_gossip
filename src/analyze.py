@@ -16,7 +16,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--predictions", nargs="+", required=True, help="one or more predictions_*.json files")
     parser.add_argument("--alpha", nargs="+", type=float, default=[0.1, 0.2], help="target miss rates")
     parser.add_argument("--k", nargs="+", type=int, default=[1, 2], help="quorum sizes (1 = intersection)")
-    parser.add_argument("--score", nargs="+", choices=["lift", "lac"], default=["lift", "lac"])
+    parser.add_argument("--score", nargs="+", choices=["lift", "margin", "lac"], default=["lift", "margin", "lac"])
     parser.add_argument("--conformal_rule", nargs="+", choices=["joint", "markov"], default=["joint", "markov"])
     parser.add_argument("--splits", type=int, default=200, help="random calibration/test splits")
     parser.add_argument("--bootstrap", type=int, default=5000, help="bootstrap resamples for intervals")
