@@ -220,6 +220,98 @@ def agent_metrics(records: list[dict[str, Any]], agent_id: str) -> dict[str, Any
     return out
 
 
+# ----------------------------------------------------------------------------------------------- F1
+
+
+def f1_per_label(gold: list[str], predicted: list[str | None], labels: list[str]) -> dict[str, float]:
+    """F1 of each label (0 when a label is never predicted and never true), plus 'macro' over the labels."""
+    out = {}
+    for label in labels:
+        tp = sum(g == label and p == label for g, p in zip(gold, predicted))
+        fp = sum(g != label and p == label for g, p in zip(gold, predicted))
+        fn = sum(g == label and p != label for g, p in zip(gold, predicted))
+        out[label] = 2 * tp / (2 * tp + fp + fn) if (2 * tp + fp + fn) else 0.0
+    out["macro"] = statistics.fmean(out[label] for label in labels)
+    return out
+
+
+def argmax_key(scores: dict[str, float]) -> str:
+    """Key with the highest score (ties broken by key order)."""
+    return max(sorted(scores), key=lambda key: scores[key])
+
+
+def axis_sides_of(axis: str) -> list[str]:
+    """The two sides of an axis, favourable first."""
+    return {"fitness": ["favourable", "low"], "metabolic": ["favourable", "adverse"]}[axis]
+
+
+def side_of(code: str | None, axis: str) -> str | None:
+    """The side of an axis a class sits on (None for no class)."""
+    if code is None:
+        return None
+    return "favourable" if axis_value(code, axis) else axis_sides_of(axis)[1]
+
+
+def ideal_class(agent_id: str, task: dict[str, Any]) -> str | None:
+    """The best a perfect reader of the agent's own data could do with the strict clinical key, taking the more
+    common class on the judgement it cannot see (fit -> CH, not fit -> CA; favourable labs -> CH, adverse -> CA).
+    Watch: resting HR below the cohort median; phone: >= 7,500 steps a day (somewhat active or more); clinics: their
+    own guideline flags; centralised: both. None for agents with no judgement of their own (ring, original)."""
+    rows = window_rows(task["rows"], task["end_date"], task["window_days"])
+    context = task["question"].get("context") or {}
+    blood, sex = context.get("blood_panel") or {}, (context.get("demographics") or {}).get("sex")
+    homa = blood["glu"] * blood["ins"] / 405.0 if "glu" in blood and "ins" in blood else None
+    glycaemic = any([blood.get("glu", 0) >= 100, blood.get("hgba1c", 0) >= 5.7, homa is not None and homa >= 2.5])
+    lipid = any([blood.get("tg", 0) >= 150, "hdl" in blood and blood["hdl"] < (40 if sex == "m" else 50)])
+    rhr = [float(r["rhr"]) for r in rows if "rhr" in r]
+    steps = [float(r["steps"]) for r in rows if "steps" in r]
+    fit_rhr = bool(rhr) and statistics.fmean(rhr) < task["cohort_reference"]["rhr"]["p50"]
+    rules = {"watch": lambda: "CH" if fit_rhr else "CA",
+             "phone": lambda: "CH" if steps and statistics.fmean(steps) >= 7500 else "CA",
+             "clinic_glycaemic": lambda: "CA" if glycaemic else "CH",
+             "clinic_lipid": lambda: "CA" if lipid else "CH",
+             "centralised": lambda: guideline_rule_class(task),
+             "centralised_axis": lambda: guideline_rule_class(task)}
+    return rules[agent_id]() if agent_id in rules else None
+
+
+def agent_f1(records: list[dict[str, Any]], agent_id: str,
+             tasks: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    """F1 of one agent: per class (four-option agents) and on its own judgement (both kinds), for the generated
+    answer, the most probable option, the option with the largest lift, and the ideal reader (when tasks are given)."""
+    own = [r for r in records if r["agent_id"] == agent_id]
+    gold = [r["gold_class"] for r in own]
+    codes = letter_class()
+    axis = own[0]["agent_axis"]
+    axes = [axis] if axis in ("fitness", "metabolic") else (["fitness", "metabolic"] if axis == "both" else [])
+    out: dict[str, Any] = {"agent_axis": axis, "two_option": "axis_question" in own[0]}
+    if out["two_option"]:
+        sides = {
+            "generated": [r["predicted_side"] for r in own],
+            "argmax_posterior": [argmax_key(r["option_logprobs_axis_posterior"]) for r in own],
+            "argmax_lift": [argmax_key({k: r["option_logprobs_axis_posterior"][k] - r["option_logprobs_axis_prior"][k]
+                                        for k in r["option_logprobs_axis_posterior"]}) for r in own],
+        }
+        if tasks is not None and ideal_class(agent_id, tasks[own[0]["task_id"]]) is not None:
+            sides["ideal"] = [side_of(ideal_class(agent_id, tasks[r["task_id"]]), axis) for r in own]
+        truth = [side_of(g, axis) for g in gold]
+        out["own_axis"] = {name: f1_per_label(truth, pred, axis_sides_of(axis)) for name, pred in sides.items()}
+        return out
+    predictions = {
+        "generated": [codes.get(r["predicted_letter"]) if r["predicted_letter"] else None for r in own],
+        "argmax_posterior": [codes[argmax_key(r["option_logprobs_posterior"])] for r in own],
+        "argmax_lift": [codes[argmax_key({l: r["option_logprobs_posterior"][l] - r["option_logprobs_prior"][l]
+                                          for l in r["option_logprobs_posterior"]})] for r in own],
+    }
+    if tasks is not None and ideal_class(agent_id, tasks[own[0]["task_id"]]) is not None:
+        predictions["ideal"] = [ideal_class(agent_id, tasks[r["task_id"]]) for r in own]
+    out["per_class"] = {name: f1_per_label(gold, pred, ws.core_classes()) for name, pred in predictions.items()}
+    out["own_axis"] = {f"{name}:{a}": f1_per_label([side_of(g, a) for g in gold], [side_of(p, a) for p in pred],
+                                                   axis_sides_of(a))
+                       for name, pred in predictions.items() for a in axes}
+    return out
+
+
 # ----------------------------------------------------------------------------------------------- baselines
 
 
@@ -321,6 +413,8 @@ def analyze_wqa(path: Path, alphas: list[float], ks: list[int], scores: list[str
         "prompt_variant": records[0].get("prompt_variant"), "model": records[0]["model_name"],
         "conditions": conditions,
         "agents": {a: agent_metrics(records, a) for a in dict.fromkeys(r["agent_id"] for r in records)},
+        "f1": {a: agent_f1(records, a, {t["task_id"]: t for t in tasks} if tasks is not None else None)
+               for a in dict.fromkeys(r["agent_id"] for r in records)},
         "conformal": {},
     }
     for name, agent_ids in conditions.items():
@@ -368,6 +462,14 @@ def format_wqa_report(report: dict[str, Any], score: str, rule: str) -> str:
         axis_mass = m.get(f"{side}_axis_mass", math.nan) if side else math.nan
         lines.append(f"{agent_id:18s} {m['agent_axis']:9s} {m['accuracy_generated']:8.3f} {m['accuracy_argmax']:8.3f} "
                      f"{axis_acc:8.3f} {axis_mass:9.3f}")
+    lines += ["", "F1: agent, prediction, per class / own judgement (favourable, other side), macro"]
+    for agent_id, f in report["f1"].items():
+        for name, values in (f.get("per_class") or {}).items():
+            cells = " ".join(f"{values[c]:.2f}" for c in ws.core_classes())
+            lines.append(f"  {agent_id:18s} {name:17s} classes CH CA D-LF D-FA: {cells} | macro {values['macro']:.2f}")
+        for name, values in f["own_axis"].items():
+            cells = " ".join(f"{v:.2f}" for k, v in values.items() if k != "macro")
+            lines.append(f"  {agent_id:18s} {name:17s} own judgement: {cells} | macro {values['macro']:.2f}")
     lines += ["", f"conformal ({score}, {rule}, k=1): condition, alpha, coverage, mean size, singleton rate"]
     for row in headline_rows(report, score, rule, 1):
         lines.append(f"  {row['condition']:28s} {row['alpha']:5.2f} {row['coverage']:6.3f} "

@@ -102,6 +102,9 @@ def validate_agent(agent: dict[str, Any]) -> None:
     for key in ("key", "steps"):
         assert not placeholders(agent[key]), f"validate_agent: {agent['name']} {key} text must have no placeholders"
     assert isinstance(agent["units"], dict), f"validate_agent: {agent['name']} units must be a mapping"
+    assert agent.get("ask", "fitness") in axis_names(), (
+        f"validate_agent: {agent['name']} has ask {agent.get('ask')!r}; use one of {axis_names()}"
+    )
 
 
 def template_files(folder: Path) -> dict[str, Path]:
@@ -372,3 +375,99 @@ def render_centralised(templates: dict[str, Any], split: dict[str, Any], agent_n
     keys = [templates["agents"][a]["key"].strip() for a in agent_names if templates["agents"][a]["key"].strip()]
     return shared["system_centralised"].strip(), fill_user(templates, data, "\n\n".join(keys),
                                                            shared["steps_centralised"])
+
+
+# ----------------------------------------------------------------------------------------------- axis questions
+
+
+def axis_names() -> list[str]:
+    """The two judgements: fitness (wearables) and metabolic (blood)."""
+    return ["fitness", "metabolic"]
+
+
+def axis_sides() -> dict[str, list[str]]:
+    """The two answers of each axis question, favourable first."""
+    return {"fitness": ["favourable", "low"], "metabolic": ["favourable", "adverse"]}
+
+
+def side_classes() -> dict[str, dict[str, list[str]]]:
+    """The two classes each side of an axis is consistent with."""
+    return {"fitness": {"favourable": ["CH", "D-FA"], "low": ["CA", "D-LF"]},
+            "metabolic": {"favourable": ["CH", "D-LF"], "adverse": ["CA", "D-FA"]}}
+
+
+def class_side(code: str, axis: str) -> str:
+    """The side of an axis a class sits on."""
+    return next(side for side, codes in side_classes()[axis].items() if code in codes)
+
+
+def validate_axis_shared(shared: dict[str, Any]) -> None:
+    """The keys the axis-question variant needs in shared.yaml."""
+    for key in ("user_axis", "axis_questions", "steps_centralised_axis"):
+        assert key in shared, f"validate_axis_shared: shared template lacks {key!r}; use the axis overlay folder"
+    unknown = placeholders(shared["user_axis"]) - (shared_user_placeholders() | {"question"})
+    assert not unknown, f"validate_axis_shared: user_axis uses unknown placeholders {sorted(unknown)}"
+    for axis in axis_names():
+        question = shared["axis_questions"].get(axis) or {}
+        sides = [o.get("side") for o in question.get("options") or []]
+        assert sides == axis_sides()[axis], (
+            f"validate_axis_shared: {axis} options have sides {sides}; expected {axis_sides()[axis]}"
+        )
+        assert isinstance(question.get("question"), str) and question["question"].strip(), (
+            f"validate_axis_shared: {axis} question text is missing"
+        )
+        assert isinstance(shared["steps_centralised_axis"].get(axis), str), (
+            f"validate_axis_shared: steps_centralised_axis has no {axis} entry"
+        )
+
+
+def asked_axis(templates: dict[str, Any], agent_name: str) -> str:
+    """The question an agent answers in the axis variant: its own axis, or `ask` (e.g. the ring)."""
+    template = templates["agents"][agent_name]
+    axis = template.get("ask", template["axis"])
+    assert axis in axis_names(), f"asked_axis: agent {agent_name} has no axis question (axis {axis!r}); set `ask`"
+    return axis
+
+
+def axis_letter_sides(axis: str, order: int) -> list[tuple[str, str]]:
+    """[(letter, side)] of an axis question: order 0 puts the favourable answer first (A), order 1 last."""
+    assert order in (0, 1), f"axis_letter_sides: order must be 0 or 1, got {order}"
+    sides = axis_sides()[axis] if order == 0 else list(reversed(axis_sides()[axis]))
+    return list(zip(["A", "B"], sides))
+
+
+def fill_axis_user(templates: dict[str, Any], axis: str, order: int, data: str, key: str, steps: str) -> str:
+    """The axis-question user text for one axis and letter order."""
+    shared = templates["shared"]
+    validate_axis_shared(shared)
+    question = shared["axis_questions"][axis]
+    texts = {o["side"]: o["text"] for o in question["options"]}
+    pairs = axis_letter_sides(axis, order)
+    values = {"question": question["question"].strip(), "options": "\n".join(f"{l}. {texts[s]}" for l, s in pairs),
+              "data": data.strip(), "key": key.strip(), "steps": steps.strip(),
+              "letters": format_letters([l for l, _ in pairs])}
+    text = shared["user_axis"].format(**values)
+    while "\n\n\n" in text:
+        text = text.replace("\n\n\n", "\n\n")
+    return text.strip()
+
+
+def render_axis_agent(templates: dict[str, Any], agent_name: str, split: dict[str, Any], order: int,
+                      with_data: bool = True, window_days: int = 28) -> tuple[str, str]:
+    """(system, user) of one device agent's own two-option question; with_data=False gives the prior."""
+    shared, template = templates["shared"], templates["agents"][agent_name]
+    data = data_block(templates, agent_name, split, window_days) if with_data else shared["empty_data"]
+    system = shared["system"].format(device=template["device"]).strip()
+    return system, fill_axis_user(templates, asked_axis(templates, agent_name), order, data, template["key"],
+                                  template["steps"])
+
+
+def render_axis_centralised(templates: dict[str, Any], split: dict[str, Any], agent_names: list[str], axis: str,
+                            order: int, with_data: bool = True, window_days: int = 28) -> tuple[str, str]:
+    """(system, user) of the centralised agent's two-option question on one axis, with every listed agent's data."""
+    shared = templates["shared"]
+    data = ("\n\n".join(data_block(templates, a, split, window_days) for a in agent_names) if with_data
+            else shared["empty_data"])
+    keys = [templates["agents"][a]["key"].strip() for a in agent_names if templates["agents"][a]["key"].strip()]
+    return shared["system_centralised"].strip(), fill_axis_user(templates, axis, order, data, "\n\n".join(keys),
+                                                                shared["steps_centralised_axis"][axis])

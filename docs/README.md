@@ -307,3 +307,33 @@ Claude docs "WearableQA phenotype — per-agent prompt templates" and "WearableQ
   one run's records. Calibration/test splits are drawn over users; D-FA is kept out of calibration, so read
   `coverage_calibrated_classes` against the 1 − α target. Output: `results/<run>/analysis/`.
 
+
+### 11a. Axis-question variant (`--variant axis_questions`)
+
+The four-option question cannot be answered by one device: the watch sees fitness only, a clinic sees blood only.
+Small models then fall back on a fixed letter. In this variant each agent is asked only the two-option question its
+data can answer, and its answer is spread evenly over the four classes.
+
+| Agent | Question asked | Class scores |
+|---|---|---|
+| watch, phone, ring | fitness/activity: favourable or low | favourable → CH, D-FA; low → CA, D-LF (each side's prob ÷ 2) |
+| clinic_glycaemic, clinic_lipid | metabolic profile: favourable or adverse | favourable → CH, D-LF; adverse → CA, D-FA |
+| `centralised_axis` | both questions on all data | p(fitness side) × p(metabolic side) |
+| `centralised` | the four-option question (kept for comparison) | as before |
+
+- Prompts: `prompts/wearableqa_phenotype_axis/` overlays the main templates. The system prompt ends "Reply with one
+  letter only." and the answer is prefilled with `Answer:` (`model_utils.build_inputs` continues a final assistant
+  message instead of opening a new one).
+- Letter bias: with `prompts.axis_orders: 2` each question is scored in both letter orders (A = favourable, then
+  A = low/adverse) and the two log-probabilities per side are averaged. The generated letter comes from order 0.
+- Records: two-option agents have `predicted_letter: null`, `predicted_side`, `true_side`, `correct` = side correct,
+  plus `option_logprobs_by_order`. Priors are scored per order.
+- Analysis prints an F1 table per agent for the generated answer, argmax posterior, argmax lift and the ideal
+  rule-reader (watch: resting HR below the cohort median; phone: steps ≥ 7,500; clinics: their own flags;
+  centralised: the guideline rule). Read each agent's own-judgement macro F1 against its ideal before calibration.
+
+```bash
+bash bluebear/submit_wqa.sh --model Qwen/Qwen3.5-2B --variant axis_questions
+bash bluebear/submit_wqa.sh --model Qwen/Qwen3.5-4B --variant axis_questions
+python src/analyze_wqa.py --predictions results/<run>/predictions_wqa_axis_questions_N75.json --tasks data/wearableqa/tasks.jsonl
+```

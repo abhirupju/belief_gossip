@@ -7,7 +7,9 @@ the HiddenBench analysis code (`analysis.scores`, `analysis.conformal`) reads th
 
 Prompt variants: strict_key (main), no_key (overlay folder without the clinical keys), daily_rows (one line per day
 instead of summaries), original (the original WearableQA wording, one agent, ten options; scores are kept for the
-four gold-capable options under the fixed letters A-D).
+four gold-capable options under the fixed letters A-D), axis_questions (each device agent answers only its own
+two-option question, in both letter orders; the two answers are spread evenly over the four classes; the centralised
+agent answers both questions, combined, and the four-option question).
 
 Example (BlueBEAR, through bluebear/submit_wqa.sh):
   python src/wqa_exp.py --config config/wearableqa_bluebear.yaml --model Qwen/Qwen3.5-2B --variant strict_key
@@ -15,6 +17,7 @@ Example (BlueBEAR, through bluebear/submit_wqa.sh):
 
 import argparse
 import json
+import math
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,13 +27,14 @@ import yaml
 
 from agent_exp import get_schema_version, load_all_models
 from utility import wqa_split as ws
-from utility.model_utils import (ModelHandle, build_chat_messages, download_model, memory_report, parse_option_letter,
-                                 query_model, score_options)
+from utility.model_utils import (ModelHandle, assistant_prefill_message, build_chat_messages, download_model,
+                                 logsumexp, memory_report, parse_option_letter, query_model, score_options)
 from utility.telemetry_utils import (Telemetry, add_event, get_span_ids, set_attributes, setup_telemetry,
                                      shutdown_telemetry, start_span)
 from utility.wqa_original import original_core_letter_map, original_letters, render_original
-from utility.wqa_prompts import (load_wqa_templates, option_letters, render_agent, render_centralised,
-                                 template_version)
+from utility.wqa_prompts import (asked_axis, axis_letter_sides, axis_names, class_side, load_wqa_templates,
+                                 option_letters, render_agent, render_axis_agent, render_axis_centralised,
+                                 render_centralised, side_classes, template_version, validate_axis_shared)
 from wqa_prepare import ensure_tasks
 
 
@@ -40,10 +44,11 @@ from wqa_prepare import ensure_tasks
 def get_variants() -> dict[str, dict[str, Any]]:
     """Prompt variants: which template folder, summaries or daily rows, device agents or the original prompt."""
     return {
-        "strict_key": {"overlay": None, "daily": False, "original": False},
-        "no_key": {"overlay": "nokey_dir", "daily": False, "original": False},
-        "daily_rows": {"overlay": None, "daily": True, "original": False},
-        "original": {"overlay": None, "daily": False, "original": True},
+        "strict_key": {"overlay": None, "daily": False, "original": False, "axis": False},
+        "no_key": {"overlay": "nokey_dir", "daily": False, "original": False, "axis": False},
+        "daily_rows": {"overlay": None, "daily": True, "original": False, "axis": False},
+        "original": {"overlay": None, "daily": False, "original": True, "axis": False},
+        "axis_questions": {"overlay": "axis_dir", "daily": False, "original": False, "axis": True},
     }
 
 
@@ -102,6 +107,9 @@ def validate_wqa_config(config: dict[str, Any]) -> None:
         assert isinstance(prompts.get(overlay_key), str) and prompts[overlay_key], (
             f"validate_wqa_config: variant {prompts['variant']} needs prompts.{overlay_key}"
         )
+    assert prompts.get("axis_orders", 2) in (1, 2), (
+        f"validate_wqa_config: prompts.axis_orders is {prompts.get('axis_orders')!r}; use 1 or 2"
+    )
     generation = config["generation"]
     assert type(generation.get("max_new_tokens")) is int and generation["max_new_tokens"] >= 1, (
         "validate_wqa_config: generation.max_new_tokens must be a positive integer"
@@ -125,10 +133,13 @@ def load_wqa_config(path: Path) -> dict[str, Any]:
 # ----------------------------------------------------------------------------------------------- records
 
 
-def chat_messages(system_text: str, user_text: str, model_class: str) -> list[dict[str, Any]]:
-    """Chat messages; an empty system text (original prompt) sends the user message alone."""
+def chat_messages(system_text: str, user_text: str, model_class: str,
+                  prefix: str | None = None) -> list[dict[str, Any]]:
+    """Chat messages; an empty system text (original prompt) sends the user message alone; a prefix is a prefilled
+    start of the reply (e.g. 'Answer:'), so the next token is the answer letter."""
     messages = build_chat_messages(system_text, user_text, model_class)
-    return messages if system_text.strip() else messages[1:]
+    messages = messages if system_text.strip() else messages[1:]
+    return messages + [assistant_prefill_message(prefix, model_class)] if prefix else messages
 
 
 def class_of_letter(letter: str | None) -> str | None:
@@ -228,23 +239,26 @@ def render_spec(templates: dict[str, Any], spec: dict[str, Any], split: dict[str
 
 
 def run_device_agents(tasks: list[dict[str, Any]], templates: dict[str, Any], handle: ModelHandle,
-                      config: dict[str, Any], telemetry: Telemetry, run_id: str) -> tuple[list[dict], dict]:
-    """Every device agent (and the centralised agent) on every task; returns (records, priors by agent)."""
+                      config: dict[str, Any], telemetry: Telemetry, run_id: str,
+                      specs: list[dict[str, Any]] | None = None) -> tuple[list[dict], dict]:
+    """The four-option question for every device agent and the centralised agent (or only the given specs) on every
+    task; returns (records, priors by agent)."""
     variant = config["prompts"]["variant"]
     daily = get_variants()[variant]["daily"]
     window_days = config["data"]["window_days"]
     letters = option_letters(templates)
     option_texts = [o["text"] for o in templates["shared"]["options"]]
     token_ids = handle.backend.option_token_ids(letters)
-    specs = device_agent_specs(config)
+    prefix = templates["shared"].get("assistant_prefix")
+    specs = device_agent_specs(config) if specs is None else specs
     missing = sorted({d for s in specs for d in s["devices"]} - set(templates["agents"]))
     assert not missing, f"run_device_agents: agents {missing} have no template in {sorted(templates['agents'])}"
     version = template_version(templates)
     priors = {}
     for spec in specs:
         system, user = render_spec(templates, spec, tasks[0]["split"], False, daily, window_days)
-        priors[spec["agent_id"]] = score_prior(handle, chat_messages(system, user, handle.model_class), token_ids,
-                                               telemetry, spec["agent_id"])
+        priors[spec["agent_id"]] = score_prior(handle, chat_messages(system, user, handle.model_class, prefix),
+                                               token_ids, telemetry, spec["agent_id"])
     records = []
     for task in tasks:
         with start_span(telemetry, f"task {task['task_index']}", {"bg.task.index": task["task_index"],
@@ -256,7 +270,8 @@ def run_device_agents(tasks: list[dict[str, Any]], templates: dict[str, Any], ha
                     system, user = render_spec(templates, spec, task["split"], True, daily, window_days)
                     add_event(telemetry, span, "prompt_rendered", {"system": system, "user": user},
                               content_keys=("system", "user"))
-                    result, latency = generate_with_scores(handle, chat_messages(system, user, handle.model_class),
+                    result, latency = generate_with_scores(handle, chat_messages(system, user, handle.model_class,
+                                                                                 prefix),
                                                            token_ids, config["generation"], telemetry,
                                                            spec["agent_id"])
                     letter = parse_option_letter(result.text, letters, option_texts)
@@ -267,6 +282,151 @@ def run_device_agents(tasks: list[dict[str, Any]], templates: dict[str, Any], ha
                         letter, priors[spec["agent_id"]], result.option_logprobs, latency, span,
                         {"condition": spec["role"], "agent_devices": spec["devices"], "agent_axis": spec_axis(
                             templates, spec), "prompt_variant": variant, "template_version": version}))
+    return records, priors
+
+
+def side_logprobs(scores_by_order: list[dict[str, float]], axis: str) -> dict[str, float]:
+    """Letter scores of each order -> side log-probabilities, averaged over the orders and renormalised."""
+    per_side: dict[str, list[float]] = {}
+    for order, scores in enumerate(scores_by_order):
+        for letter, side in axis_letter_sides(axis, order):
+            per_side.setdefault(side, []).append(scores[letter])
+    mean = {side: sum(values) / len(values) for side, values in per_side.items()}
+    total = logsumexp(list(mean.values()))
+    return {side: value - total for side, value in mean.items()}
+
+
+def classes_from_sides(axis: str, sides: dict[str, float]) -> dict[str, float]:
+    """Four-class log-probabilities (fixed letters) from one axis: each side's mass split evenly over its classes."""
+    fixed = ws.fixed_letter_map()
+    out = {}
+    for side, codes in side_classes()[axis].items():
+        for code in codes:
+            out[fixed[code]] = sides[side] - math.log(len(codes))
+    return dict(sorted(out.items()))
+
+
+def classes_from_both_axes(fitness: dict[str, float], metabolic: dict[str, float]) -> dict[str, float]:
+    """Four-class log-probabilities from both axes: log p(fitness side) + log p(metabolic side)."""
+    fixed = ws.fixed_letter_map()
+    return dict(sorted((fixed[code], fitness[class_side(code, "fitness")] + metabolic[class_side(code, "metabolic")])
+                       for code in fixed))
+
+
+def parsed_side(text: str, axis: str, order: int, templates: dict[str, Any]) -> str | None:
+    """The side a two-option reply chose, or None."""
+    texts = {o["side"]: o["text"] for o in templates["shared"]["axis_questions"][axis]["options"]}
+    pairs = axis_letter_sides(axis, order)
+    letter = parse_option_letter(text, [l for l, _ in pairs], [texts[s] for _, s in pairs])
+    return dict(pairs).get(letter) if letter else None
+
+
+def ask_axis(handle: ModelHandle, render: Callable[[int, bool], tuple[str, str]], axis: str, orders: list[int],
+             prior_scores: list[dict[str, float]] | None, templates: dict[str, Any], config: dict[str, Any],
+             telemetry: Telemetry, agent_id: str) -> dict[str, Any]:
+    """One two-option question in every letter order: generate in order 0, prompt-only scores in the others."""
+    prefix = templates["shared"].get("assistant_prefix")
+    token_ids = handle.backend.option_token_ids(["A", "B"])
+    if prior_scores is None:
+        prior_scores = []
+        for order in orders:
+            system, user = render(order, False)
+            prior_scores.append(score_prior(handle, chat_messages(system, user, handle.model_class, prefix),
+                                            token_ids, telemetry, agent_id))
+    scores, result, latency = [], None, 0.0
+    for order in orders:
+        system, user = render(order, True)
+        messages = chat_messages(system, user, handle.model_class, prefix)
+        if order == 0:
+            result, latency = generate_with_scores(handle, messages, token_ids, config["generation"], telemetry,
+                                                   agent_id)
+            scores.append(result.option_logprobs)
+        else:
+            scores.append(score_options(handle, messages, token_ids))
+    return {"axis": axis, "result": result, "latency": latency, "scores_by_order": scores,
+            "prior_scores_by_order": prior_scores, "side": parsed_side(result.text, axis, 0, templates),
+            "posterior_sides": side_logprobs(scores, axis), "prior_sides": side_logprobs(prior_scores, axis)}
+
+
+def axis_record_fields(answer: dict[str, Any], gold_class: str) -> dict[str, Any]:
+    """The per-axis fields of a record."""
+    axis = answer["axis"]
+    return {"axis_question": axis, "predicted_side": answer["side"], "true_side": class_side(gold_class, axis),
+            "side_correct": answer["side"] == class_side(gold_class, axis),
+            "option_logprobs_axis_prior": answer["prior_sides"],
+            "option_logprobs_axis_posterior": answer["posterior_sides"],
+            "option_logprobs_by_order": answer["scores_by_order"], "raw_response_by_axis": answer["result"].text}
+
+
+def run_axis_agents(tasks: list[dict[str, Any]], templates: dict[str, Any], handle: ModelHandle,
+                    config: dict[str, Any], telemetry: Telemetry, run_id: str) -> tuple[list[dict], dict]:
+    """Axis-question variant: every device agent answers its own two-option question; the centralised agent answers
+    both (combined, agent 'centralised_axis') and the four-option question (agent 'centralised')."""
+    validate_axis_shared(templates["shared"])
+    orders = list(range(config["prompts"].get("axis_orders", 2)))
+    window_days = config["data"]["window_days"]
+    version = template_version(templates)
+    variant = config["prompts"]["variant"]
+    specs = device_agent_specs(config)
+    devices = [s for s in specs if s["role"] == "device"]
+    missing = sorted({s["devices"][0] for s in devices} - set(templates["agents"]))
+    assert not missing, f"run_axis_agents: agents {missing} have no template in {sorted(templates['agents'])}"
+    central = [s for s in specs if s["role"] == "centralised"]
+    priors: dict[str, Any] = {}
+    records: list[dict[str, Any]] = []
+    for task in tasks:
+        split = task["split"]
+        with start_span(telemetry, f"task {task['task_index']}", {"bg.task.index": task["task_index"],
+                                                                  "bg.task.id": task["task_id"]}):
+            for spec in devices:
+                name = spec["devices"][0]
+                axis = asked_axis(templates, name)
+                with start_span(telemetry, f"invoke_agent {name}", {"gen_ai.agent.id": name,
+                                                                     "bg.axis": axis}) as span:
+                    answer = ask_axis(
+                        handle, lambda order, with_data: render_axis_agent(templates, name, split, order, with_data,
+                                                                           window_days),
+                        axis, orders, priors.get(name), templates, config, telemetry, name)
+                    priors[name] = answer["prior_scores_by_order"]
+                    fields = axis_record_fields(answer, task["gold_class"])
+                    records.append(make_wqa_record(
+                        run_id, task, name, spec["agent_index"], "device", handle.name, answer["result"], None,
+                        classes_from_sides(axis, answer["prior_sides"]),
+                        classes_from_sides(axis, answer["posterior_sides"]), answer["latency"], span,
+                        {"condition": "device", "agent_devices": [name], "agent_axis": axis,
+                         "prompt_variant": variant, "template_version": version, **fields,
+                         "predicted_answer": answer["side"], "parse_ok": answer["side"] is not None,
+                         "correct": fields["side_correct"]}))
+            for spec in central:
+                agent_id = "centralised_axis"
+                with start_span(telemetry, f"invoke_agent {agent_id}", {"gen_ai.agent.id": agent_id}) as span:
+                    answers = {}
+                    for axis in axis_names():
+                        key = f"{agent_id}:{axis}"
+                        answers[axis] = ask_axis(
+                            handle, lambda order, with_data, axis=axis: render_axis_centralised(
+                                templates, split, spec["devices"], axis, order, with_data, window_days),
+                            axis, orders, priors.get(key), templates, config, telemetry, agent_id)
+                        priors[key] = answers[axis]["prior_scores_by_order"]
+                    fit, met = answers["fitness"], answers["metabolic"]
+                    letter = None
+                    if fit["side"] and met["side"]:
+                        code = next(c for c in ws.core_classes() if class_side(c, "fitness") == fit["side"]
+                                    and class_side(c, "metabolic") == met["side"])
+                        letter = ws.fixed_letter_map()[code]
+                    records.append(make_wqa_record(
+                        run_id, task, agent_id, spec["agent_index"] + 1, "centralised", handle.name, fit["result"],
+                        letter, classes_from_both_axes(fit["prior_sides"], met["prior_sides"]),
+                        classes_from_both_axes(fit["posterior_sides"], met["posterior_sides"]),
+                        fit["latency"] + met["latency"], span,
+                        {"condition": "centralised", "agent_devices": spec["devices"], "agent_axis": "both",
+                         "prompt_variant": variant, "template_version": version,
+                         "axes": {axis: axis_record_fields(a, task["gold_class"]) for axis, a in answers.items()},
+                         "raw_response": f"fitness: {fit['result'].text!r}; metabolic: {met['result'].text!r}"}))
+    if central:
+        four_records, four_priors = run_device_agents(tasks, templates, handle, config, telemetry, run_id, central)
+        records += four_records
+        priors.update(four_priors)
     return records, priors
 
 
@@ -316,7 +476,8 @@ def run_original_agent(tasks: list[dict[str, Any]], handle: ModelHandle, config:
 
 
 def accuracy_by_agent(records: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
-    """Accuracy and parse failures of the generated letter, per agent id."""
+    """Accuracy and parse failures of the generated answer, per agent id (for an agent asked a two-option axis
+    question: accuracy of the side it chose on its own question)."""
     out: dict[str, dict[str, float]] = {}
     for agent_id in dict.fromkeys(r["agent_id"] for r in records):
         own = [r for r in records if r["agent_id"] == agent_id]
@@ -386,6 +547,8 @@ def run_wqa_experiment(config: dict[str, Any], paths: dict[str, Path], num_sampl
     with start_span(telemetry, f"run {config['experiment']['name']}", run_info):
         if settings["original"]:
             records, priors = run_original_agent(tasks, handle, config, telemetry, run_id)
+        elif settings["axis"]:
+            records, priors = run_axis_agents(tasks, templates, handle, config, telemetry, run_id)
         else:
             records, priors = run_device_agents(tasks, templates, handle, config, telemetry, run_id)
     shutdown_telemetry(telemetry)

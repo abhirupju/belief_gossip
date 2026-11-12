@@ -1,0 +1,78 @@
+# Axis-question variant (overlay on prompts/wearableqa_phenotype): each device agent answers only the judgement its
+# data covers, as a two-option question (A/B), instead of choosing one of the four phenotypes. The runner spreads the
+# two answers evenly over the four classes (e.g. favourable fitness -> CH and D-FA, half each) and averages the two
+# letter orders, so the conformal code still receives four option scores and a letter bias cancels out.
+# The centralised agent answers both two-option questions on all the data (scores multiplied), and also the
+# four-option question as a comparison. Every prompt asks for one letter and the reply is prefilled with
+# `assistant_prefix`, so the first generated token is the letter.
+name: shared
+version: 1-axis
+mode: answer_only
+assistant_prefix: "Answer:"
+system: |
+  You are the {device} assistant of one person. You see only the data recorded by the {device}. Other devices hold other data and will answer separately. Use the clinical key below; do not use other knowledge. Reply with one letter only.
+system_centralised: |
+  You are the health assistant of one person. You see the data from all of their devices and their latest blood test. Use the clinical key below; do not use other knowledge. Reply with one letter only.
+user: |
+  === QUESTION ===
+  Based on this person's last 28 days of data and their blood tests, which phenotype best describes them?
+
+  The four phenotypes combine two judgements:
+  - FITNESS: is wearable fitness/activity favourable or low?
+  - METABOLIC: is the blood metabolic profile favourable or adverse?
+
+  === OPTIONS ===
+  {options}
+
+  {data}
+
+  {key}
+
+  === HOW TO ANSWER ===
+  {steps}
+  Answer with one letter ({letters}).
+user_axis: |
+  === QUESTION ===
+  {question}
+
+  === OPTIONS ===
+  {options}
+
+  {data}
+
+  {key}
+
+  === HOW TO ANSWER ===
+  {steps}
+  Answer with one letter ({letters}).
+options:
+  - {letter: A, code: CH, text: "Concordant healthy: favourable fitness AND favourable metabolic profile."}
+  - {letter: B, code: CA, text: "Concordant adverse: low fitness AND adverse metabolic profile."}
+  - {letter: C, code: D-LF, text: "Discordant, low fitness: low fitness BUT favourable metabolic profile."}
+  - {letter: D, code: D-FA, text: "Discordant, fit: favourable fitness BUT adverse metabolic profile."}
+# Two-option questions; the first option is letter A in order 0 and letter B in order 1.
+axis_questions:
+  fitness:
+    question: "Based on this person's last 28 days of data, is their wearable fitness/activity favourable or low?"
+    options:
+      - {side: favourable, text: "Favourable fitness/activity."}
+      - {side: low, text: "Low fitness/activity."}
+  metabolic:
+    question: "Based on this person's blood tests, is their metabolic profile favourable or adverse?"
+    options:
+      - {side: favourable, text: "Favourable metabolic profile."}
+      - {side: adverse, text: "Adverse metabolic profile."}
+not_measured: "not measured"
+empty_data: |
+  === YOUR DATA ===
+  (No data from this device for this question.)
+steps_centralised: |
+  1. Decide the fitness judgement and the metabolic judgement, using the clinical key.
+  2. If a value is "not measured", do not treat it as normal.
+steps_centralised_axis:
+  fitness: |
+    1. Decide the fitness judgement, using the clinical key.
+    2. If a value is "not measured", do not treat it as normal.
+  metabolic: |
+    1. Decide the metabolic judgement, using the clinical key.
+    2. If a value is "not measured", do not treat it as normal.

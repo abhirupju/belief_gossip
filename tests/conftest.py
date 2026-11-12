@@ -33,8 +33,8 @@ def make_fake_tasks() -> list[dict[str, Any]]:
 
 
 def user_text_of(messages: list[dict[str, Any]]) -> str:
-    """The user message text, whether content is a string or a list of parts."""
-    content = messages[-1]["content"]
+    """The last user message's text, whether content is a string or a list of parts (a prefill may follow it)."""
+    content = [m for m in messages if m["role"] == "user"][-1]["content"]
     return content if isinstance(content, str) else " ".join(part["text"] for part in content)
 
 
@@ -281,6 +281,12 @@ def wqa_prompt_dir() -> Path:
 
 
 @pytest.fixture
+def wqa_axis_dir() -> Path:
+    """The repository's axis-question overlay."""
+    return Path(__file__).resolve().parent.parent / "prompts" / "wearableqa_phenotype_axis"
+
+
+@pytest.fixture
 def wqa_nokey_dir() -> Path:
     """The repository's no-key overlay."""
     return Path(__file__).resolve().parent.parent / "prompts" / "wearableqa_phenotype_nokey"
@@ -300,7 +306,7 @@ def wqa_config():
         "data": {"raw_file": "wearableqa/WearableQA_raw.json", "tasks_file": "wearableqa/tasks.jsonl",
                  "window_days": 28},
         "prompts": {"dir": "prompts/wearableqa_phenotype", "nokey_dir": "prompts/wearableqa_phenotype_nokey",
-                    "variant": "strict_key"},
+                    "axis_dir": "prompts/wearableqa_phenotype_axis", "axis_orders": 2, "variant": "strict_key"},
         "generation": {"max_new_tokens": 4, "do_sample": False, "seed": 0},
         "telemetry": {"enabled": True, "capture_content": True, "otlp_endpoint": None},
     }

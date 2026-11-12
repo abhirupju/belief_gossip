@@ -1,0 +1,22 @@
+# Axis-question variant: same data and clinical key as prompts/wearableqa_phenotype; the steps no longer
+# mention the other judgement, because this agent is asked only its own two-option question.
+# Ring agent: sleep only; informs neither judgement directly. Experiments run with and without it.
+name: ring
+version: 1-axis
+device: ring
+axis: none
+ask: fitness                    # no judgement of its own: answers the fitness question as a null agent
+units: {sleep_duration: h, sleep_efficiency: "", deep_percentage: "%", rem_percentage: "%", bed_time_std: min}
+data: |
+  === YOUR DATA (ring, last 28 days) ===
+  Sleep duration: {sleep_duration}
+  Sleep efficiency: {sleep_efficiency}
+  Deep sleep: {deep_percentage}
+  REM sleep: {rem_percentage}
+  Bedtime variability: {bed_time_std}
+key: |
+  === CLINICAL KEY (ring) ===
+  - Adults should sleep 7 hours or more. Short sleep is associated with obesity, diabetes and heart disease, but does not measure fitness or blood results.
+steps: |
+  1. Use the clinical key.
+  2. If a value is "not measured", do not treat it as normal.

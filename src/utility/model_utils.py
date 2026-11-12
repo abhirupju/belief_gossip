@@ -48,10 +48,15 @@ class HFBackend:
         self.device = device
 
     def build_inputs(self, messages: list[dict[str, Any]]) -> Any:
-        """Apply the chat template (thinking disabled) and move tensors to the device."""
+        """Apply the chat template (thinking disabled) and move tensors to the device.
+
+        A final assistant message is a prefill: the template continues it instead of opening a new reply, so the
+        next token follows the prefilled text (e.g. 'Answer:').
+        """
+        prefill = messages[-1]["role"] == "assistant"
         inputs = self.processor.apply_chat_template(
-            messages, add_generation_prompt=True, tokenize=True, return_dict=True,
-            return_tensors="pt", enable_thinking=False,
+            messages, add_generation_prompt=not prefill, continue_final_message=prefill, tokenize=True,
+            return_dict=True, return_tensors="pt", enable_thinking=False,
         )
         return inputs.to(self.device)
 
@@ -309,6 +314,13 @@ def choose_dtype(model_name: str, model_root: Path, device: str, model_class: st
     best = min(timings, key=timings.get)
     choice_path.write_text(json.dumps({"dtype": best, "seconds_per_query": timings}, indent=2), encoding="utf-8")
     return best
+
+
+def assistant_prefill_message(text: str, model_class: str) -> dict[str, Any]:
+    """A final assistant message that the chat template continues (see HFBackend.build_inputs)."""
+    assert model_class in ("multimodal", "causal"), f"assistant_prefill_message: unresolved model_class {model_class!r}"
+    content = [{"type": "text", "text": text}] if model_class == "multimodal" else text
+    return {"role": "assistant", "content": content}
 
 
 def build_chat_messages(system_text: str, user_text: str, model_class: str) -> list[dict[str, Any]]:

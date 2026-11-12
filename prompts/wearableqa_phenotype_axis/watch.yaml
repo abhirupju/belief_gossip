@@ -1,0 +1,26 @@
+# Axis-question variant: same data and clinical key as prompts/wearableqa_phenotype; the steps no longer
+# mention the other judgement, because this agent is asked only its own two-option question.
+# Watch agent: decides the FITNESS judgement.
+# {rhr}, {vo2_max}, {hrv}: rendered 28-day summaries ("mean ..., median ..., range ..., n/28 days" + cohort
+# percentiles and position where the cohort reference has the metric), or shared.not_measured.
+# {exercise}: "<sessions> sessions, mean <h> h on exercise days" or shared.not_measured.
+name: watch
+version: 1-axis
+device: watch
+axis: fitness
+units: {rhr: bpm, vo2_max: mL/kg/min, hrv: ms, exercise_hours: h}
+data: |
+  === YOUR DATA (watch, last 28 days) ===
+  Resting heart rate: {rhr}
+  VO2max (estimated): {vo2_max}
+  HRV: {hrv}
+  Exercise: {exercise}
+key: |
+  === CLINICAL KEY (watch) ===
+  - Resting heart rate is the main sign: lower resting heart rate means higher cardiorespiratory fitness. Below the population median (p50) -> favourable fitness. Above it -> low fitness.
+  - VO2max: higher is fitter. Typical median is about 49 (men) / 41 (women) mL/kg/min at age 20-29 and drops about 9% per decade.
+  - Higher HRV and regular exercise support favourable fitness. They are weaker signs than resting heart rate.
+  - The watch says nothing about blood glucose, insulin or lipids.
+steps: |
+  1. Decide the fitness judgement from your data, using the clinical key.
+  2. If a value is "not measured", do not treat it as normal.

@@ -1,0 +1,25 @@
+# Axis-question variant: same data and clinical key as prompts/wearableqa_phenotype; the steps no longer
+# mention the other judgement, because this agent is asked only its own two-option question.
+# Lipid clinic agent: part of the METABOLIC judgement (triglycerides, HDL). Strict guideline cut-offs.
+# Each blood placeholder renders as "<value> <unit>" or shared.not_measured.
+name: clinic_lipid
+version: 1-axis
+device: lipid clinic
+axis: metabolic
+units: {tg: mg/dL, hdl: mg/dL}
+data: |
+  === YOUR DATA (lipid clinic, latest blood test) ===
+  Age: {age}. Sex: {sex}.
+  Triglycerides: {tg}
+  HDL cholesterol: {hdl}
+key: |
+  === CLINICAL KEY (lipid clinic) ===
+  Your tests show an ADVERSE metabolic profile if any one of these holds:
+  - triglycerides 150 mg/dL or higher
+  - HDL below 40 mg/dL in men or below 50 mg/dL in women
+  If none holds, your tests do not show an adverse profile.
+  Blood tests say nothing about wearable fitness or activity.
+steps: |
+  1. Decide the metabolic judgement from your tests, using the clinical key.
+  2. Other blood tests, which you do not see, can also show an adverse profile; answer from your own tests.
+  3. If a value is "not measured", do not treat it as normal.

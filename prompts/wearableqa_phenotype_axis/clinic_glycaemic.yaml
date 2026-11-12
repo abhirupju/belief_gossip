@@ -1,0 +1,28 @@
+# Axis-question variant: same data and clinical key as prompts/wearableqa_phenotype; the steps no longer
+# mention the other judgement, because this agent is asked only its own two-option question.
+# Glycaemic clinic agent: part of the METABOLIC judgement (glucose, HbA1c, insulin, HOMA-IR). Strict guideline cut-offs.
+# Each blood placeholder renders as "<value> <unit>" or shared.not_measured; {homa} is computed as glu x ins / 405.
+name: clinic_glycaemic
+version: 1-axis
+device: glycaemic clinic
+axis: metabolic
+units: {glu: mg/dL, hba1c: "%", ins: uIU/mL, homa: ""}
+data: |
+  === YOUR DATA (glycaemic clinic, latest blood test) ===
+  Age: {age}. Sex: {sex}.
+  Fasting glucose: {glu}
+  HbA1c: {hba1c}
+  Fasting insulin: {ins}
+  HOMA-IR (glucose x insulin / 405): {homa}
+key: |
+  === CLINICAL KEY (glycaemic clinic) ===
+  Your tests show an ADVERSE metabolic profile if any one of these holds:
+  - fasting glucose 100 mg/dL or higher (prediabetes 100-125; diabetes 126 or higher)
+  - HbA1c 5.7% or higher (prediabetes 5.7-6.4; diabetes 6.5 or higher)
+  - HOMA-IR 2.5 or higher (insulin resistance)
+  If none holds, your tests do not show an adverse profile.
+  Blood tests say nothing about wearable fitness or activity.
+steps: |
+  1. Decide the metabolic judgement from your tests, using the clinical key.
+  2. Other blood tests, which you do not see, can also show an adverse profile; answer from your own tests.
+  3. If a value is "not measured", do not treat it as normal.

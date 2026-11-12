@@ -26,7 +26,9 @@ data:                           # relative to --data_dir
 prompts:
   dir: prompts/wearableqa_phenotype
   nokey_dir: prompts/wearableqa_phenotype_nokey   # overlay used by the no_key variant
-  variant: strict_key           # strict_key | no_key | daily_rows | original
+  axis_dir: prompts/wearableqa_phenotype_axis     # overlay used by the axis_questions variant
+  axis_orders: 2                # axis_questions: score both letter orders and average (1 = order A/B only)
+  variant: strict_key           # strict_key | no_key | daily_rows | original | axis_questions
 
 generation:
   max_new_tokens: 4             # answer only: one token plus headroom

@@ -1,0 +1,23 @@
+# Axis-question variant: same data and clinical key as prompts/wearableqa_phenotype; the steps no longer
+# mention the other judgement, because this agent is asked only its own two-option question.
+# Phone agent: supports the FITNESS judgement (activity); holds the demographics.
+name: phone
+version: 1-axis
+device: phone
+axis: fitness
+units: {steps: steps/day, active_burn: kcal/day}
+data: |
+  === YOUR DATA (phone, last 28 days) ===
+  Profile: age {age}, sex {sex}, BMI {bmi}.
+  Steps per day: {steps}
+  Active calories per day: {active_burn}
+key: |
+  === CLINICAL KEY (phone) ===
+  - Steps per day: under 5,000 is sedentary; 5,000-7,499 low active; 7,500-9,999 somewhat active; 10,000 or more active.
+  - Active -> supports favourable fitness. Sedentary or low active -> supports low fitness.
+  - Steps measure activity, not fitness itself; treat them as supporting evidence.
+  - Age, sex and BMI do not decide either judgement on their own.
+  - The phone says nothing about blood glucose, insulin or lipids.
+steps: |
+  1. Decide the fitness judgement from your data, using the clinical key.
+  2. If a value is "not measured", do not treat it as normal.
