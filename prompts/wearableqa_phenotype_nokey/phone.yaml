@@ -1,0 +1,17 @@
+# No-key ablation (E6): the clinical key is removed; everything else as in prompts/wearableqa_phenotype.
+# Phone agent: supports the FITNESS judgement (activity); holds the demographics.
+name: phone
+version: 1-nokey
+device: phone
+axis: fitness
+units: {steps: steps/day, active_burn: kcal/day}
+data: |
+  === YOUR DATA (phone, last 28 days) ===
+  Profile: age {age}, sex {sex}, BMI {bmi}.
+  Steps per day: {steps}
+  Active calories per day: {active_burn}
+key: ""
+steps: |
+  1. Decide the fitness judgement from your data.
+  2. Your data says nothing about the metabolic judgement. Treat both answers to it as equally likely: do not guess it.
+  3. If a value is "not measured", do not treat it as normal.

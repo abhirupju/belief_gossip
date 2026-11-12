@@ -278,3 +278,32 @@ Job settings (`bluebear/run_experiment.sbatch`): account from `submit.sh`, `--qo
 - "refusing to load a second copy": the same model was requested with two different devices or dtypes in one process.
 - "--reasoning is on but template ... has mode answer_only": pass a reasoning template, or drop `--reasoning`.
 - The analysis says "reasoning-mode runs have none": reasoning runs save no option scores; analyse an answer-only run.
+
+## 11. WearableQA phenotype dataset (device agents)
+
+A second dataset: the 75 WearableQA multimodal-phenotype questions, four classes (CH, CA, D-LF, D-FA). Each question
+is split across device agents with private data: watch, phone, ring, glycaemic clinic, lipid clinic. Design:
+Claude docs "WearableQA phenotype — per-agent prompt templates" and "WearableQA phenotype — implementation spec".
+
+| Step | Command (from `code/`) | Where |
+|---|---|---|
+| Put the data in place | copy `WearableQA_raw.json` to `data/wearableqa/` (on BlueBEAR: `$BG_STORE/data/wearableqa/`) | once |
+| Build tasks + read prompts by eye | `python src/wqa_prepare.py --preview 10` → `data/wearableqa/tasks.jsonl`, `prompt_preview.txt` | Mac or login node |
+| Download a model (+ tasks) | `bash bluebear/download_wqa.sh --model Qwen/Qwen3.5-2B` | BlueBEAR login node |
+| Run (every agent + centralised) | `bash bluebear/submit_wqa.sh --model Qwen/Qwen3.5-2B --variant strict_key` | BlueBEAR |
+| Original-prompt baseline (E5) | `bash bluebear/submit_wqa.sh --model Qwen/Qwen3.5-2B --variant original` | BlueBEAR |
+| Ablations (E6, E7) | `--variant no_key`, `--variant daily_rows` | BlueBEAR |
+| Analyse | `python src/analyze_wqa.py --predictions results/<run>/predictions_wqa_<variant>_N75.json --tasks data/wearableqa/tasks.jsonl --rf` | Mac (needs scikit-learn, matplotlib) |
+
+- Config: `config/wearableqa_bluebear.yaml`. `--model` selects a listed model by its Hugging Face name; any other
+  name replaces the default model. `agents.devices` lists the agents scored; `centralised: true` adds one agent that
+  sees every device's data and key.
+- Prompts: `prompts/wearableqa_phenotype/` (strict clinical key); `prompts/wearableqa_phenotype_nokey/` overlays the
+  no-key ablation. Summary statistics over the last 28 days, never raw values (except `daily_rows`).
+- Records (`predictions_wqa_<variant>_N<N>.json`) have the HiddenBench fields plus `dataset`, `user_id`,
+  `gold_class`, `condition`, `agent_axis`, `prompt_variant`, `template_version`. The prior is the agent's own prompt
+  with `empty_data` in place of the data (clinical key kept), scored once per agent.
+- Analysis: conditions (single agents, `fusion_no_ring`, `fusion_with_ring`, centralised, original) are chosen from
+  one run's records. Calibration/test splits are drawn over users; D-FA is kept out of calibration, so read
+  `coverage_calibrated_classes` against the 1 − α target. Output: `results/<run>/analysis/`.
+

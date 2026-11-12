@@ -211,3 +211,108 @@ def config_copy(base_config) -> Callable:
         return config
 
     return factory
+
+
+# ----------------------------------------------------------------------------------------------- WearableQA fakes
+
+
+def make_wqa_fake_raw() -> dict[str, Any]:
+    """A small WearableQA source: 6 users, 8 multimodal-phenotype questions (all four gold classes) + 1 other."""
+    from utility import wqa_split as ws
+
+    codes = [code for _, code in ws.phenotype_option_rules()]
+    texts = {code: prefix + " - fake detail" for prefix, code in ws.phenotype_option_rules()}
+
+    def options_for(gold: str, shift: int) -> tuple[dict[str, str], str]:
+        letters = "ABCDEFGHIJ"
+        options = {letters[i]: texts[codes[(i + shift) % 10]] for i in range(10)}
+        return options, next(l for l, t in options.items() if ws.option_class(t) == gold)
+
+    def history(rhr: float, steps: float | None, start_day: int = 1) -> list[dict[str, Any]]:
+        rows = []
+        for day in range(start_day, 32):
+            row = {"date": f"2024-01-{day:02d}", "resting_hr": rhr + day % 3, "sleep_duration": 7.0 + (day % 4) / 4,
+                   "hrv": 45.0, "exercise_count": float(day % 2), "exercise_hours": 0.5 if day % 2 else 0.0,
+                   "avg_stress_level": -1.0, "_source": "x"}
+            if steps is not None and day % 7:
+                row["steps"] = steps + 10 * day
+            rows.append(row)
+        return rows
+
+    good = {"hgba1c": 5.2, "glu": 85.0, "ins": 5.0, "tg": 90.0, "hdl": 60.0, "ldl": 100.0, "tsh": 2.0}
+    bad = {"hgba1c": 5.9, "glu": 120.0, "ins": 20.0, "tg": 220.0, "hdl": 35.0, "ldl": 160.0}
+    no_ins = {k: v for k, v in good.items() if k != "ins"}
+    spec = [  # (question id, user, gold, blood, sex)
+        ("q1", "u1", "CH", good, "m"), ("q2", "u1", "CH", no_ins, "m"), ("q3", "u2", "CA", bad, "f"),
+        ("q4", "u3", "D-LF", good, "f"), ("q5", "u4", "D-FA", bad, "m"), ("q6", "u5", "CA", bad, "m"),
+        ("q7", "u6", "CH", good, "f"), ("q8", "u5", "D-LF", no_ins, "m"),
+    ]
+    fit = {"u1": 50.0, "u2": 75.0, "u3": 72.0, "u4": 48.0, "u5": 78.0, "u6": 52.0}
+    histories = {u: history(r, None if u == "u3" else 9000.0 if r < 60 else 4000.0) for u, r in fit.items()}
+    mcqs = []
+    for i, (qid, user, gold, blood, sex) in enumerate(spec):
+        options, gold_letter = options_for(gold, i)
+        mcqs.append({"id": qid, "user_id": user, "question_type": "multimodal_phenotype",
+                     "stem": "Based on this user's most recent 28-day wearable record and the available blood "
+                             "markers, which phenotype label best characterizes this individual?",
+                     "options": options, "gt_letter": gold_letter, "reasoning_group": "health", "signal": "cross",
+                     "grounding": "literature",
+                     "context": {"demographics": {"age": 40.0, "sex": sex, "bmi": 26.5, "ethnicity": "white"},
+                                 "blood_panel": dict(blood)},
+                     "end_date": "2024-01-31", "window_size": 28, "full_dropped_metrics": [], "no_cohort": i == 7})
+    other = dict(mcqs[0], id="q9", question_type="signal_summary")
+    cohort = {"rhr": {"p10": 49.0, "p25": 54.0, "p50": 60.0, "p75": 66.0, "p90": 71.0, "_n_users": 10},
+              "steps": {"p10": 4900.0, "p25": 6300.0, "p50": 8100.0, "p75": 10200.0, "p90": 12800.0},
+              "sleep_duration": {"p10": 6.1, "p25": 6.7, "p50": 7.2, "p75": 7.7, "p90": 8.2}}
+    return {"n_mcqs": 9, "mcqs": mcqs + [other], "user_histories": histories, "cohort_reference": cohort,
+            "description": "fake WearableQA"}
+
+
+@pytest.fixture
+def wqa_raw() -> dict[str, Any]:
+    """Fake WearableQA source (see make_wqa_fake_raw)."""
+    return make_wqa_fake_raw()
+
+
+@pytest.fixture
+def wqa_prompt_dir() -> Path:
+    """The repository's WearableQA templates."""
+    return Path(__file__).resolve().parent.parent / "prompts" / "wearableqa_phenotype"
+
+
+@pytest.fixture
+def wqa_nokey_dir() -> Path:
+    """The repository's no-key overlay."""
+    return Path(__file__).resolve().parent.parent / "prompts" / "wearableqa_phenotype_nokey"
+
+
+@pytest.fixture
+def wqa_config():
+    """A valid WearableQA config using the fake causal model on CPU."""
+    return {
+        "experiment": {"name": "wqa_test", "dataset": "wearableqa_phenotype", "protocol": "single_round"},
+        "models": {"fake": {"hf_name": "fake/causal-model", "model_class": "auto", "dtype": "float32",
+                            "device": "cpu"},
+                   "fake2": {"hf_name": "fake/second-model", "model_class": "auto", "dtype": "float32",
+                             "device": "cpu"}},
+        "agents": {"default_model": "fake", "devices": ["watch", "phone", "ring", "clinic_glycaemic", "clinic_lipid"],
+                   "centralised": True, "centralised_devices": None},
+        "data": {"raw_file": "wearableqa/WearableQA_raw.json", "tasks_file": "wearableqa/tasks.jsonl",
+                 "window_days": 28},
+        "prompts": {"dir": "prompts/wearableqa_phenotype", "nokey_dir": "prompts/wearableqa_phenotype_nokey",
+                    "variant": "strict_key"},
+        "generation": {"max_new_tokens": 4, "do_sample": False, "seed": 0},
+        "telemetry": {"enabled": True, "capture_content": True, "otlp_endpoint": None},
+    }
+
+
+@pytest.fixture
+def wqa_paths(tmp_path, wqa_raw, fake_model_root):
+    """Raw file in a temporary data root; prompts from the repository."""
+    data_dir = tmp_path / "data"
+    raw = data_dir / "wearableqa" / "WearableQA_raw.json"
+    raw.parent.mkdir(parents=True)
+    raw.write_text(json.dumps(wqa_raw), encoding="utf-8")
+    return {"data_dir": data_dir, "raw": raw, "tasks": data_dir / "wearableqa" / "tasks.jsonl",
+            "model_dir": fake_model_root, "results_dir": tmp_path / "results",
+            "prompt_root": Path(__file__).resolve().parent.parent}

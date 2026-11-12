@@ -49,3 +49,6 @@ Slurm account: `ghoshaz-multi-agent-llms` (`BG_ACCOUNT` in `env.sh`; `submit.sh`
 - Multi-round protocol (C4a): `python src/simulate_protocol.py --predictions <k1 predictions file>`
 - Belief update (C4b): `python src/belief_update.py` (cache, BlueBEAR) then `src/simulate_protocol.py --variant D --rescored <cache>`
 - Design plan (Claude doc): "HiddenBench Agent Codebase — Implementation Plan"
+- WearableQA phenotype dataset: `src/wqa_prepare.py`, `src/wqa_exp.py`, `src/analyze_wqa.py`, prompts in
+  `prompts/wearableqa_phenotype*/`; run guide in `docs/README.md` section 11; spec (Claude doc): "WearableQA phenotype —
+  implementation spec for CSD experiments"

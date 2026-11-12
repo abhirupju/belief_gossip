@@ -1,0 +1,39 @@
+# WearableQA multimodal-phenotype runs on BlueBEAR (A100 40 GB). One run per model and prompt variant:
+#   bash bluebear/submit_wqa.sh --model Qwen/Qwen3.5-2B --variant strict_key
+#   bash bluebear/submit_wqa.sh --model Qwen/Qwen3.5-4B --variant original
+# A model listed below is selected by its hf_name; any other name replaces the default model.
+# Every device agent is scored; conditions (fusion with / without the ring, ...) are chosen at analysis time.
+experiment:
+  name: wqa_bluebear
+  dataset: wearableqa_phenotype
+  protocol: single_round
+
+models:
+  qwen35_2b: {hf_name: Qwen/Qwen3.5-2B, model_class: auto, dtype: bfloat16, device: cuda}
+  qwen35_4b: {hf_name: Qwen/Qwen3.5-4B, model_class: auto, dtype: bfloat16, device: cuda}
+
+agents:
+  default_model: qwen35_2b
+  devices: [watch, phone, ring, clinic_glycaemic, clinic_lipid]
+  centralised: true             # one more agent that sees every device's data and key
+  centralised_devices: null     # null = all devices above
+
+data:                           # relative to --data_dir
+  raw_file: wearableqa/WearableQA_raw.json
+  tasks_file: wearableqa/tasks.jsonl   # built from raw_file on first use (src/wqa_prepare.py)
+  window_days: 28
+
+prompts:
+  dir: prompts/wearableqa_phenotype
+  nokey_dir: prompts/wearableqa_phenotype_nokey   # overlay used by the no_key variant
+  variant: strict_key           # strict_key | no_key | daily_rows | original
+
+generation:
+  max_new_tokens: 4             # answer only: one token plus headroom
+  do_sample: false
+  seed: 0
+
+telemetry:
+  enabled: true
+  capture_content: false        # keeps traces small
+  otlp_endpoint: null

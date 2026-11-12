@@ -1,0 +1,21 @@
+# No-key ablation (E6): the clinical key is removed; everything else as in prompts/wearableqa_phenotype.
+# Watch agent: decides the FITNESS judgement.
+# {rhr}, {vo2_max}, {hrv}: rendered 28-day summaries ("mean ..., median ..., range ..., n/28 days" + cohort
+# percentiles and position where the cohort reference has the metric), or shared.not_measured.
+# {exercise}: "<sessions> sessions, mean <h> h on exercise days" or shared.not_measured.
+name: watch
+version: 1-nokey
+device: watch
+axis: fitness
+units: {rhr: bpm, vo2_max: mL/kg/min, hrv: ms, exercise_hours: h}
+data: |
+  === YOUR DATA (watch, last 28 days) ===
+  Resting heart rate: {rhr}
+  VO2max (estimated): {vo2_max}
+  HRV: {hrv}
+  Exercise: {exercise}
+key: ""
+steps: |
+  1. Decide the fitness judgement from your data.
+  2. Your data says nothing about the metabolic judgement. Treat both answers to it as equally likely: do not guess it.
+  3. If a value is "not measured", do not treat it as normal.

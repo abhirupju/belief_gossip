@@ -1,0 +1,46 @@
+# No-key ablation (E6): overlay on prompts/wearableqa_phenotype; same as the main shared.yaml except that the
+# system texts and the centralised steps do not refer to a clinical key.
+# WearableQA multimodal-phenotype task: parts shared by every agent prompt.
+# A rendered prompt = system + user, where user = question + options + {data} + {key} + how-to-answer.
+# The agent files (watch, phone, ring, clinic_glycaemic, clinic_lipid) supply device, data, key and steps.
+# Design notes and clinical sources: Claude doc "WearableQA phenotype - per-agent prompt templates (draft)".
+name: shared
+version: 1-nokey
+mode: answer_only
+system: |
+  You are the {device} assistant of one person. You see only the data recorded by the {device}. Other devices hold other data and will answer separately. Use your own knowledge to interpret the data.
+system_centralised: |
+  You are the health assistant of one person. You see the data from all of their devices and their latest blood test. Use your own knowledge to interpret the data.
+user: |
+  === QUESTION ===
+  Based on this person's last 28 days of data and their blood tests, which phenotype best describes them?
+
+  The four phenotypes combine two judgements:
+  - FITNESS: is wearable fitness/activity favourable or low?
+  - METABOLIC: is the blood metabolic profile favourable or adverse?
+
+  === OPTIONS ===
+  {options}
+
+  {data}
+
+  {key}
+
+  === HOW TO ANSWER ===
+  {steps}
+  Answer with one letter ({letters}).
+  Answer:
+# Fixed letter order (a null-prompt check gave a near-uniform letter distribution, so no rotation).
+options:
+  - {letter: A, code: CH, text: "Concordant healthy: favourable fitness AND favourable metabolic profile."}
+  - {letter: B, code: CA, text: "Concordant adverse: low fitness AND adverse metabolic profile."}
+  - {letter: C, code: D-LF, text: "Discordant, low fitness: low fitness BUT favourable metabolic profile."}
+  - {letter: D, code: D-FA, text: "Discordant, fit: favourable fitness BUT adverse metabolic profile."}
+not_measured: "not measured"
+# Data block used for the prior (no-data) prompt of every agent.
+empty_data: |
+  === YOUR DATA ===
+  (No data from this device for this question.)
+steps_centralised: |
+  1. Decide the fitness judgement and the metabolic judgement from the data.
+  2. If a value is "not measured", do not treat it as normal.

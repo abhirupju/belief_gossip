@@ -1,0 +1,19 @@
+# No-key ablation (E6): the clinical key is removed; everything else as in prompts/wearableqa_phenotype.
+# Lipid clinic agent: part of the METABOLIC judgement (triglycerides, HDL).
+# Each blood placeholder renders as "<value> <unit>" or shared.not_measured.
+name: clinic_lipid
+version: 1-nokey
+device: lipid clinic
+axis: metabolic
+units: {tg: mg/dL, hdl: mg/dL}
+data: |
+  === YOUR DATA (lipid clinic, latest blood test) ===
+  Age: {age}. Sex: {sex}.
+  Triglycerides: {tg}
+  HDL cholesterol: {hdl}
+key: ""
+steps: |
+  1. Decide the metabolic judgement from your tests.
+  2. Other blood tests, which you do not see, can also show an adverse profile. If your tests are normal, favour FAVOURABLE but do not rule out ADVERSE.
+  3. Your data says nothing about the fitness judgement. Treat both answers to it as equally likely: do not guess it.
+  4. If a value is "not measured", do not treat it as normal.
