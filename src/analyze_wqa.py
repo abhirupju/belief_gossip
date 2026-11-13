@@ -8,7 +8,21 @@ evaluate_sets, summarize_splits), used unchanged. What is specific to this datas
   figure the 1 - alpha target applies to;
 - coverage and set size are also reported per gold class and per judgement axis;
 - agent groups ("conditions") are chosen here from one run's records: single agents, fusion without and with the
-  ring, the centralised agent, the original prompt.
+  ring, the centralised agent, the original prompt;
+- prior (`--prior`): `empirical` (default) replaces each agent's prompted prior by its average posterior over the
+  calibration users of each split (no labels used); `prompt` keeps the prior scored from the empty-data prompt.
+  The prompted prior is not neutral: "no data" reads as evidence of low fitness / adverse labs;
+- axis-question runs (`--axis_order`): `both` uses the scores averaged over the two letter orders; `0` or `1`
+  rebuilds the scores from one order only (the generated answer always comes from order 0);
+- besides the standard (marginal) sets above, two more set constructions over the same splits, both with the
+  joint rule at k = 1 and every class in calibration:
+  * classwise (Mondrian): one threshold per class from that class's calibration questions, so each class is covered
+    with probability >= 1 - alpha. A class with fewer than 1/alpha - 1 calibration questions gets an infinite
+    threshold and is always kept (D-FA, 3 questions in all) -- the conservative bound;
+  * structured (axis_questions runs): each judgement (fitness, metabolic) gets its own set of sides, calibrated per
+    side at alpha/2 by the agents that answer it; the class set is every class whose two sides are both kept. Each
+    side is covered with probability >= 1 - alpha/2, so the class set covers with probability >= 1 - alpha. D-FA
+    borrows its calibration from the fit side (CH) and the adverse side (CA); its own coverage is reported apart.
 
 Example (from code/):
   python src/analyze_wqa.py --predictions results/<run>/predictions_wqa_strict_key_N75.json \
@@ -27,7 +41,8 @@ from analysis.conformal import (calibrate, evaluate_sets, get_score_functions, q
                                 thresholds_for)
 from analysis.scores import build_task_views, load_predictions
 from utility import wqa_split as ws
-from utility.wqa_prompts import window_rows
+from utility.wqa_prompts import axis_letter_sides, window_rows
+from wqa_exp import classes_from_both_axes, classes_from_sides
 from wqa_prepare import load_tasks
 
 
@@ -99,6 +114,77 @@ def condition_views(records: list[dict[str, Any]], agent_ids: list[str]) -> list
     return views
 
 
+# ----------------------------------------------------------------------------------------------- priors and orders
+
+
+def mean_log_distribution(distributions: list[dict[str, float]]) -> dict[str, float]:
+    """Log of the average of several distributions given as log-probabilities, renormalised."""
+    assert distributions, "mean_log_distribution: no distributions"
+    keys = sorted(distributions[0])
+    mean = {k: statistics.fmean(math.exp(d[k]) for d in distributions) for k in keys}
+    total = sum(mean.values())
+    return {k: math.log(v / total) for k, v in mean.items()}
+
+
+def empirical_prior_views(views: list[dict[str, Any]], fit_users: set[str]) -> list[dict[str, Any]]:
+    """Copies of the views whose agents' prior is the agent's average posterior over the views of `fit_users` (no
+    labels used), and whose lift is posterior minus that prior."""
+    fitted = [v for v in views if v["user_id"] in fit_users]
+    assert fitted, "empirical_prior_views: no views from the fit users"
+    priors = [mean_log_distribution([v["agents"][i]["posterior"] for v in fitted])
+              for i in range(len(fitted[0]["agents"]))]
+    out = []
+    for view in views:
+        agents = [dict(agent, prior=prior, lift={l: agent["posterior"][l] - prior[l] for l in agent["posterior"]})
+                  for agent, prior in zip(view["agents"], priors)]
+        out.append(dict(view, agents=agents))
+    return out
+
+
+def priors_path_for(predictions: Path) -> Path:
+    """priors_wqa_<...>.json next to predictions_wqa_<...>.json."""
+    return predictions.parent / predictions.name.replace("predictions_", "priors_", 1)
+
+
+def sides_at_order(scores: dict[str, float], axis: str, order: int) -> dict[str, float]:
+    """Side log-probabilities from the letter scores of one letter order, renormalised over the two sides."""
+    per_side = {side: scores[letter] for letter, side in axis_letter_sides(axis, order)}
+    total = math.log(sum(math.exp(v) for v in per_side.values()))
+    return {side: value - total for side, value in per_side.items()}
+
+
+def axis_answer_at_order(fields: dict[str, Any], prior_scores: list[dict[str, float]], order: int) -> dict[str, Any]:
+    """One axis answer's fields with the side scores rebuilt from one letter order (prior from the priors file)."""
+    axis = fields["axis_question"]
+    assert order < len(fields["option_logprobs_by_order"]) and order < len(prior_scores), (
+        f"axis_answer_at_order: order {order} was not scored in this run")
+    return dict(fields, option_logprobs_axis_posterior=sides_at_order(fields["option_logprobs_by_order"][order], axis,
+                                                                      order),
+                option_logprobs_axis_prior=sides_at_order(prior_scores[order], axis, order))
+
+
+def records_at_axis_order(records: list[dict[str, Any]], priors: dict[str, Any], order: int) -> list[dict[str, Any]]:
+    """Axis-question records with every two-option score rebuilt from one letter order; other records unchanged."""
+    out = []
+    for record in records:
+        if "axis_question" in record:
+            fields = axis_answer_at_order(record, priors[record["agent_id"]], order)
+            axis = record["axis_question"]
+            out.append(dict(fields, option_logprobs_posterior=classes_from_sides(
+                axis, fields["option_logprobs_axis_posterior"]), option_logprobs_prior=classes_from_sides(
+                axis, fields["option_logprobs_axis_prior"])))
+        elif "axes" in record:
+            axes = {axis: axis_answer_at_order(fields, priors[f"{record['agent_id']}:{axis}"], order)
+                    for axis, fields in record["axes"].items()}
+            out.append(dict(record, axes=axes, option_logprobs_posterior=classes_from_both_axes(
+                axes["fitness"]["option_logprobs_axis_posterior"], axes["metabolic"]["option_logprobs_axis_posterior"]),
+                option_logprobs_prior=classes_from_both_axes(axes["fitness"]["option_logprobs_axis_prior"],
+                                                             axes["metabolic"]["option_logprobs_axis_prior"])))
+        else:
+            out.append(record)
+    return out
+
+
 # ----------------------------------------------------------------------------------------------- grouped conformal
 
 
@@ -148,16 +234,21 @@ def summarize_tallies(tallies: dict[str, Any]) -> dict[str, Any]:
 
 
 def run_grouped_conformal(views: list[dict[str, Any]], splits: list[set[str]], score: str, rule: str, alpha: float,
-                          k: int, exclude_from_calibration: tuple[str, ...] = ("D-FA",)) -> dict[str, Any]:
-    """analysis.conformal's calibrate / thresholds_for / quorum_set / evaluate_sets over user-grouped splits."""
+                          k: int, exclude_from_calibration: tuple[str, ...] = ("D-FA",),
+                          prior: str = "prompt") -> dict[str, Any]:
+    """analysis.conformal's calibrate / thresholds_for / quorum_set / evaluate_sets over user-grouped splits.
+    prior 'empirical': in each split the agents' priors are their average posteriors over the calibration users
+    (all of their tasks, no labels), so lift and margin scores are measured against what the agent usually says."""
     assert type(k) is int and k >= 1, f"run_grouped_conformal: k must be a positive integer, got {k!r}"
+    assert prior in ("prompt", "empirical"), f"run_grouped_conformal: unknown prior {prior!r}"
     n_agents = min(len(v["agents"]) for v in views)
     assert k <= n_agents, f"run_grouped_conformal: k={k} is larger than the {n_agents} agents per task"
     score_fn = get_score_functions()[score]
     per_split, sizes = [], []
     tallies: dict[str, Any] = {"per_class": {}, "per_axis": {}}
     for calibration_groups in splits:
-        calibration, test = split_views(views, calibration_groups, exclude_from_calibration)
+        split = empirical_prior_views(views, calibration_groups) if prior == "empirical" else views
+        calibration, test = split_views(split, calibration_groups, exclude_from_calibration)
         assert calibration and test, "run_grouped_conformal: a split left calibration or test empty"
         calibrated = calibrate(calibration, score_fn, rule, alpha, k)
         sets = [quorum_set(v, score_fn, thresholds_for(v, calibrated, rule, alpha, k), k) for v in test]
@@ -168,10 +259,155 @@ def run_grouped_conformal(views: list[dict[str, Any]], splits: list[set[str]], s
     kept = [e for cls, e in tallies["per_class"].items() if cls not in exclude_from_calibration]
     covered = sum(e["covered"] for e in kept)
     total = sum(e["n"] for e in kept)
-    return {"score": score, "rule": rule, "alpha": alpha, "k": k, "n_splits": len(splits),
+    return {"score": score, "rule": rule, "alpha": alpha, "k": k, "prior": prior, "n_splits": len(splits),
             "n_calibration_mean": statistics.fmean(sizes), "exclude_from_calibration": list(exclude_from_calibration),
             "metrics": summarize_splits(per_split),
             "coverage_calibrated_classes": covered / total if total else math.nan, **summary}
+
+
+# ----------------------------------------------------------------------------------------------- classwise and structured
+
+
+def classwise_thresholds(calibration: list[dict[str, Any]], score_fn: Any, alpha: float,
+                         k: int) -> dict[str, float]:
+    """One joint-rule threshold per label from the calibration views of that label (+inf with too few or none)."""
+    out = {}
+    for label in calibration[0]["letters"]:
+        own = [v for v in calibration if v["true_letter"] == label]
+        out[label] = calibrate(own, score_fn, "joint", alpha, k) if own else math.inf
+    return out
+
+
+def classwise_set(view: dict[str, Any], score_fn: Any, thresholds: dict[str, float], k: int) -> list[str]:
+    """Labels kept by the quorum when each label is tested against its own threshold."""
+    return [label for label in view["letters"]
+            if label in quorum_set(view, score_fn, [thresholds[label]] * len(view["agents"]), k)]
+
+
+def pooled_coverage(tallies: dict[str, Any]) -> float:
+    """Coverage over every test question of every class."""
+    entries = tallies["per_class"].values()
+    total = sum(e["n"] for e in entries)
+    return sum(e["covered"] for e in entries) / total if total else math.nan
+
+
+def run_classwise_conformal(views: list[dict[str, Any]], splits: list[set[str]], score: str, alpha: float,
+                            k: int = 1, prior: str = "empirical") -> dict[str, Any]:
+    """Classwise (Mondrian) sets over the user-grouped splits: every class is calibrated on its own questions, D-FA
+    included; a class whose threshold is infinite is always kept."""
+    score_fn = get_score_functions()[score]
+    per_split, infinite = [], {}
+    tallies: dict[str, Any] = {"per_class": {}, "per_axis": {}}
+    codes = letter_class()
+    for calibration_groups in splits:
+        split = empirical_prior_views(views, calibration_groups) if prior == "empirical" else views
+        calibration, test = split_views(split, calibration_groups, ())
+        thresholds = classwise_thresholds(calibration, score_fn, alpha, k)
+        for letter, value in thresholds.items():
+            infinite[codes[letter]] = infinite.get(codes[letter], 0) + math.isinf(value)
+        sets = [classwise_set(v, score_fn, thresholds, k) for v in test]
+        per_split.append(evaluate_sets(test, sets))
+        class_and_axis_tallies(test, sets, tallies)
+    return {"method": "classwise", "score": score, "rule": "joint", "alpha": alpha, "k": k, "prior": prior,
+            "n_splits": len(splits), "metrics": summarize_splits(per_split),
+            "infinite_threshold_share": {c: n / len(splits) for c, n in sorted(infinite.items())},
+            **summarize_tallies(tallies)}
+
+
+def judgement_conditions(records: list[dict[str, Any]]) -> dict[str, dict[str, list[str]]]:
+    """Agent groups per judgement for the structured sets (axis_questions runs only): fusion without and with the
+    ring, the watch alone for fitness, and the centralised agent's two answers."""
+    present = {r["agent_id"]: r for r in records}
+    by_axis = {axis: [a for a in ("watch", "phone") if a in present and present[a].get("axis_question") == axis]
+               + [a for a in ("clinic_glycaemic", "clinic_lipid") if a in present
+                  and present[a].get("axis_question") == axis] for axis in ("fitness", "metabolic")}
+    out: dict[str, dict[str, list[str]]] = {}
+    if by_axis["fitness"] and by_axis["metabolic"]:
+        out["fusion_no_ring"] = dict(by_axis)
+        if "ring" in present and "axis_question" in present["ring"]:
+            out["fusion_with_ring"] = {"fitness": by_axis["fitness"] + ["ring"], "metabolic": by_axis["metabolic"]}
+        if "watch" in by_axis["fitness"] and len(by_axis["fitness"]) > 1:
+            out["watch_and_clinics"] = {"fitness": ["watch"], "metabolic": by_axis["metabolic"]}
+    if "centralised_axis" in present:
+        out["centralised_axis"] = {"fitness": ["centralised_axis"], "metabolic": ["centralised_axis"]}
+    return out
+
+
+def axis_fields(record: dict[str, Any], axis: str) -> dict[str, Any]:
+    """A record's answer to one judgement (a two-option agent's own fields, or one axis of centralised_axis)."""
+    fields = record["axes"][axis] if "axes" in record else record
+    assert fields.get("axis_question") == axis, (
+        f"axis_fields: {record['agent_id']} did not answer the {axis} question")
+    return fields
+
+
+def side_views(records: list[dict[str, Any]], agent_ids: list[str], axis: str) -> list[dict[str, Any]]:
+    """Per task: the listed agents' answers to one judgement, as two-label views (labels = the axis sides)."""
+    by_task: dict[int, dict[str, dict[str, Any]]] = {}
+    for record in records:
+        if record["agent_id"] in agent_ids:
+            by_task.setdefault(record["task_index"], {})[record["agent_id"]] = record
+    views = []
+    for task_index, agents in sorted(by_task.items()):
+        assert len(agents) == len(agent_ids), f"side_views: task {task_index} lacks some of {agent_ids}"
+        first = agents[agent_ids[0]]
+        view_agents = []
+        for index, agent_id in enumerate(agent_ids):
+            fields = axis_fields(agents[agent_id], axis)
+            prior, posterior = fields["option_logprobs_axis_prior"], fields["option_logprobs_axis_posterior"]
+            view_agents.append({"agent_index": index, "prior": prior, "posterior": posterior,
+                                "lift": {s: posterior[s] - prior[s] for s in posterior},
+                                "generated": [fields["predicted_side"]]})
+        views.append({"task_index": task_index, "task_id": first["task_id"], "user_id": first["user_id"],
+                      "gold_class": first["gold_class"], "true_letter": side_of(first["gold_class"], axis),
+                      "letters": axis_sides_of(axis), "agents": view_agents})
+    return views
+
+
+def classes_from_side_sets(fitness: list[str], metabolic: list[str]) -> list[str]:
+    """Fixed letters of the classes whose fitness and metabolic sides are both kept."""
+    fixed = ws.fixed_letter_map()
+    return sorted(fixed[c] for c in ws.core_classes()
+                  if side_of(c, "fitness") in fitness and side_of(c, "metabolic") in metabolic)
+
+
+def run_structured_conformal(axis_views: dict[str, list[dict[str, Any]]], splits: list[set[str]], score: str,
+                             alpha: float, k: int = 1, prior: str = "empirical") -> dict[str, Any]:
+    """Per-judgement sets: each axis calibrated per side (classwise on its two sides) at alpha/2 by its own agents,
+    every class in calibration; the class set is the product of the two side sets."""
+    assert set(axis_views) == {"fitness", "metabolic"}, f"run_structured_conformal: axes {sorted(axis_views)}"
+    score_fn = get_score_functions()[score]
+    fixed = ws.fixed_letter_map()
+    per_split = []
+    tallies: dict[str, Any] = {"per_class": {}, "per_axis": {}}
+    side_tallies: dict[str, dict[str, dict[str, float]]] = {}
+    for calibration_groups in splits:
+        side_sets: dict[str, dict[int, list[str]]] = {}
+        test_info: dict[int, dict[str, Any]] = {}
+        for axis, views in axis_views.items():
+            split = empirical_prior_views(views, calibration_groups) if prior == "empirical" else views
+            calibration, test = split_views(split, calibration_groups, ())
+            thresholds = classwise_thresholds(calibration, score_fn, alpha / 2, k)
+            side_sets[axis] = {v["task_index"]: classwise_set(v, score_fn, thresholds, k) for v in test}
+            for v in test:
+                test_info[v["task_index"]] = v
+                entry = side_tallies.setdefault(axis, {}).setdefault(v["true_letter"], {"n": 0, "covered": 0,
+                                                                                          "size_sum": 0})
+                kept = side_sets[axis][v["task_index"]]
+                entry["n"] += 1
+                entry["covered"] += v["true_letter"] in kept
+                entry["size_sum"] += len(kept)
+        order = sorted(test_info)
+        test = [{"true_letter": fixed[test_info[i]["gold_class"]], "letters": sorted(fixed.values()),
+                 "gold_class": test_info[i]["gold_class"]} for i in order]
+        sets = [classes_from_side_sets(side_sets["fitness"][i], side_sets["metabolic"][i]) for i in order]
+        per_split.append(evaluate_sets(test, sets))
+        class_and_axis_tallies(test, sets, tallies)
+    per_side = {axis: {side: {"n": e["n"], "coverage": e["covered"] / e["n"], "mean_set_size": e["size_sum"] / e["n"]}
+                       for side, e in sorted(sides.items())} for axis, sides in side_tallies.items()}
+    return {"method": "structured", "score": score, "rule": "joint", "alpha": alpha,
+            "alpha_per_judgement": alpha / 2, "k": k, "prior": prior, "n_splits": len(splits),
+            "metrics": summarize_splits(per_split), "per_side": per_side, **summarize_tallies(tallies)}
 
 
 # ----------------------------------------------------------------------------------------------- per-agent metrics
@@ -278,7 +514,8 @@ def ideal_class(agent_id: str, task: dict[str, Any]) -> str | None:
 def agent_f1(records: list[dict[str, Any]], agent_id: str,
              tasks: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """F1 of one agent: per class (four-option agents) and on its own judgement (both kinds), for the generated
-    answer, the most probable option, the option with the largest lift, and the ideal reader (when tasks are given)."""
+    answer, the most probable option, the option with the largest lift over the prompted prior and over the empirical
+    prior (the agent's average posterior over all its tasks, no labels), and the ideal reader (when tasks are given)."""
     own = [r for r in records if r["agent_id"] == agent_id]
     gold = [r["gold_class"] for r in own]
     codes = letter_class()
@@ -292,6 +529,9 @@ def agent_f1(records: list[dict[str, Any]], agent_id: str,
             "argmax_lift": [argmax_key({k: r["option_logprobs_axis_posterior"][k] - r["option_logprobs_axis_prior"][k]
                                         for k in r["option_logprobs_axis_posterior"]}) for r in own],
         }
+        empirical = mean_log_distribution([r["option_logprobs_axis_posterior"] for r in own])
+        sides["argmax_lift_empirical"] = [argmax_key({k: v - empirical[k] for k, v in
+                                                      r["option_logprobs_axis_posterior"].items()}) for r in own]
         if tasks is not None and ideal_class(agent_id, tasks[own[0]["task_id"]]) is not None:
             sides["ideal"] = [side_of(ideal_class(agent_id, tasks[r["task_id"]]), axis) for r in own]
         truth = [side_of(g, axis) for g in gold]
@@ -303,6 +543,9 @@ def agent_f1(records: list[dict[str, Any]], agent_id: str,
         "argmax_lift": [codes[argmax_key({l: r["option_logprobs_posterior"][l] - r["option_logprobs_prior"][l]
                                           for l in r["option_logprobs_posterior"]})] for r in own],
     }
+    empirical = mean_log_distribution([r["option_logprobs_posterior"] for r in own])
+    predictions["argmax_lift_empirical"] = [codes[argmax_key({l: v - empirical[l] for l, v in
+                                                              r["option_logprobs_posterior"].items()})] for r in own]
     if tasks is not None and ideal_class(agent_id, tasks[own[0]["task_id"]]) is not None:
         predictions["ideal"] = [ideal_class(agent_id, tasks[r["task_id"]]) for r in own]
     out["per_class"] = {name: f1_per_label(gold, pred, ws.core_classes()) for name, pred in predictions.items()}
@@ -401,9 +644,15 @@ def rf_views(tasks: list[dict[str, Any]], seed: int = 0) -> list[dict[str, Any]]
 
 def analyze_wqa(path: Path, alphas: list[float], ks: list[int], scores: list[str], rules: list[str],
                 n_splits: int = 200, seed: int = 0, exclude_from_calibration: tuple[str, ...] = ("D-FA",),
-                tasks: list[dict[str, Any]] | None = None, with_rf: bool = False) -> dict[str, Any]:
+                tasks: list[dict[str, Any]] | None = None, with_rf: bool = False, prior: str = "empirical",
+                axis_order: str = "both") -> dict[str, Any]:
     """Every metric for one predictions file (plus baselines when the tasks are given)."""
+    assert axis_order in ("both", "0", "1"), f"analyze_wqa: axis_order must be both, 0 or 1, got {axis_order!r}"
     records = load_wqa_predictions(path)
+    if axis_order != "both":
+        assert any("axis_question" in r for r in records), "analyze_wqa: --axis_order needs an axis_questions run"
+        priors = json.loads(priors_path_for(path).read_text(encoding="utf-8"))
+        records = records_at_axis_order(records, priors, int(axis_order))
     users = [r["user_id"] for r in records]
     splits = make_group_splits(users, n_splits, seed)
     conditions = get_conditions(records)
@@ -420,8 +669,18 @@ def analyze_wqa(path: Path, alphas: list[float], ks: list[int], scores: list[str
     for name, agent_ids in conditions.items():
         views = condition_views(records, agent_ids)
         report["conformal"][name] = [
-            run_grouped_conformal(views, splits, score, rule, alpha, k, exclude_from_calibration)
+            run_grouped_conformal(views, splits, score, rule, alpha, k, exclude_from_calibration, prior)
             for score in scores for rule in rules for alpha in alphas for k in ks if k <= len(agent_ids)]
+    report["classwise"] = {
+        name: [run_classwise_conformal(condition_views(records, agent_ids), splits, score, alpha, 1, prior)
+               for score in scores for alpha in alphas]
+        for name, agent_ids in conditions.items()}
+    report["structured"] = {}
+    for name, groups in judgement_conditions(records).items():
+        axis_views = {axis: side_views(records, agent_ids, axis) for axis, agent_ids in groups.items()}
+        report["structured"][name] = {"agents": groups, "results": [
+            run_structured_conformal(axis_views, splits, score, alpha, 1, prior)
+            for score in scores for alpha in alphas]}
     if tasks is not None:
         indices = {r["task_index"] for r in records}
         chosen = [t for t in tasks if t["task_index"] in indices]
@@ -435,7 +694,8 @@ def analyze_wqa(path: Path, alphas: list[float], ks: list[int], scores: list[str
                 "conformal": [run_grouped_conformal(views, splits, "lac", "joint", alpha, 1, exclude_from_calibration)
                               for alpha in alphas]}
     report["settings"] = {"alphas": alphas, "ks": ks, "scores": scores, "rules": rules, "n_splits": n_splits,
-                          "seed": seed, "exclude_from_calibration": list(exclude_from_calibration)}
+                          "seed": seed, "exclude_from_calibration": list(exclude_from_calibration), "prior": prior,
+                          "axis_order": axis_order}
     return report
 
 
@@ -447,14 +707,18 @@ def headline_rows(report: dict[str, Any], score: str, rule: str, k: int) -> list
             if (result["score"], result["rule"], result["k"]) == (score, rule, k):
                 m = result["metrics"]
                 rows.append({"condition": name, "alpha": result["alpha"], "coverage": m["coverage"]["mean"],
+                             "coverage_calibrated_classes": result["coverage_calibrated_classes"],
+                             "dfa_coverage": result["per_class"].get("D-FA", {}).get("coverage", math.nan),
                              "mean_set_size": m["mean_set_size"]["mean"], "singleton_rate": m["singleton_rate"]["mean"]})
     return rows
 
 
 def format_wqa_report(report: dict[str, Any], score: str, rule: str) -> str:
     """Plain-text tables: per-agent metrics, then the k=1 conformal grid for one score and rule."""
+    settings = report.get("settings", {})
     lines = [f"{report['predictions_file']}", f"model {report['model']}, variant {report['prompt_variant']}, "
-             f"{report['num_tasks']} tasks, {report['num_users']} users", "",
+             f"{report['num_tasks']} tasks, {report['num_users']} users, prior {settings.get('prior')}, "
+             f"axis order {settings.get('axis_order')}", "",
              f"{'agent':18s} {'axis':9s} {'acc_gen':>8s} {'acc_max':>8s} {'axis_acc':>8s} {'axis_mass':>9s}"]
     for agent_id, m in report["agents"].items():
         side = m["agent_axis"] if m["agent_axis"] in ("fitness", "metabolic") else None
@@ -466,14 +730,17 @@ def format_wqa_report(report: dict[str, Any], score: str, rule: str) -> str:
     for agent_id, f in report["f1"].items():
         for name, values in (f.get("per_class") or {}).items():
             cells = " ".join(f"{values[c]:.2f}" for c in ws.core_classes())
-            lines.append(f"  {agent_id:18s} {name:17s} classes CH CA D-LF D-FA: {cells} | macro {values['macro']:.2f}")
+            lines.append(f"  {agent_id:18s} {name:21s} classes CH CA D-LF D-FA: {cells} | macro {values['macro']:.2f}")
         for name, values in f["own_axis"].items():
             cells = " ".join(f"{v:.2f}" for k, v in values.items() if k != "macro")
-            lines.append(f"  {agent_id:18s} {name:17s} own judgement: {cells} | macro {values['macro']:.2f}")
-    lines += ["", f"conformal ({score}, {rule}, k=1): condition, alpha, coverage, mean size, singleton rate"]
+            lines.append(f"  {agent_id:18s} {name:21s} own judgement: {cells} | macro {values['macro']:.2f}")
+    lines += ["", f"standard conformal ({score}, {rule}, k=1, prior {settings.get('prior')}, D-FA not calibrated)",
+              f"  {'condition':28s} {'alpha':>5s} {'cov':>6s} {'cov_cal':>7s} {'D-FA':>6s} {'size':>6s} {'single':>6s}"]
     for row in headline_rows(report, score, rule, 1):
         lines.append(f"  {row['condition']:28s} {row['alpha']:5.2f} {row['coverage']:6.3f} "
+                     f"{row['coverage_calibrated_classes']:7.3f} {row['dfa_coverage']:6.3f} "
                      f"{row['mean_set_size']:6.2f} {row['singleton_rate']:6.3f}")
+    lines += format_set_methods(report, score)
     if "baselines" in report:
         lines += ["", f"guideline rule accuracy {report['baselines']['guideline_rule']['accuracy']:.3f}"]
         if "random_forest" in report["baselines"]:
@@ -482,12 +749,54 @@ def format_wqa_report(report: dict[str, Any], score: str, rule: str) -> str:
     return "\n".join(lines)
 
 
+def format_set_methods(report: dict[str, Any], score: str) -> list[str]:
+    """Tables for the structured (per-judgement) and classwise sets: coverage, D-FA coverage, size, singletons."""
+    lines = []
+
+    def row(name: str, result: dict[str, Any], extra: str) -> str:
+        m = result["metrics"]
+        dfa = result["per_class"].get("D-FA", {}).get("coverage", math.nan)
+        return (f"  {name:28s} {result['alpha']:5.2f} {m['coverage']['mean']:6.3f} {dfa:6.3f} "
+                f"{m['mean_set_size']['mean']:6.2f} {m['singleton_rate']['mean']:6.3f} {extra}")
+
+    if report.get("structured"):
+        lines += ["", f"structured conformal ({score}, joint, k=1, each judgement per side at alpha/2, all classes "
+                      "calibrated)",
+                  f"  {'condition':28s} {'alpha':>5s} {'cov':>6s} {'D-FA':>6s} {'size':>6s} {'single':>6s} "
+                  "side coverage fit/low | favourable/adverse"]
+        for name, entry in report["structured"].items():
+            for result in entry["results"]:
+                if result["score"] != score:
+                    continue
+                sides = result["per_side"]
+                cells = (f"{sides['fitness']['favourable']['coverage']:.2f}/{sides['fitness']['low']['coverage']:.2f} | "
+                         f"{sides['metabolic']['favourable']['coverage']:.2f}/"
+                         f"{sides['metabolic']['adverse']['coverage']:.2f}")
+                lines.append(row(name, result, cells))
+    if report.get("classwise"):
+        lines += ["", f"classwise conformal ({score}, joint, k=1, one threshold per class, all classes calibrated)",
+                  f"  {'condition':28s} {'alpha':>5s} {'cov':>6s} {'D-FA':>6s} {'size':>6s} {'single':>6s} "
+                  "D-FA always kept"]
+        for name, results in report["classwise"].items():
+            for result in results:
+                if result["score"] == score:
+                    lines.append(row(name, result, f"{result['infinite_threshold_share'].get('D-FA', math.nan):.2f}"))
+    return lines
+
+
+def report_suffix(report: dict[str, Any]) -> str:
+    """File-name suffix for non-default analysis settings ('' for the prompted prior and both orders)."""
+    settings = report.get("settings", {})
+    suffix = "" if settings.get("prior", "prompt") == "prompt" else f"_prior-{settings['prior']}"
+    return suffix + ("" if settings.get("axis_order", "both") == "both" else f"_order-{settings['axis_order']}")
+
+
 def save_wqa_report(report: dict[str, Any]) -> Path:
     """analysis/analysis_<predictions stem>.json next to the predictions file."""
     path = Path(report["predictions_file"])
     out_dir = path.parent / "analysis"
     out_dir.mkdir(exist_ok=True)
-    out = out_dir / f"analysis_{path.stem.removeprefix('predictions_')}.json"
+    out = out_dir / f"analysis_{path.stem.removeprefix('predictions_')}{report_suffix(report)}.json"
     out.write_text(json.dumps(report, indent=2), encoding="utf-8")
     return out
 
@@ -502,7 +811,7 @@ def plot_wqa_report(report: dict[str, Any], score: str, rule: str) -> list[Path]
     path = Path(report["predictions_file"])
     out_dir = path.parent / "analysis"
     out_dir.mkdir(exist_ok=True)
-    stem = path.stem.removeprefix("predictions_")
+    stem = path.stem.removeprefix("predictions_") + report_suffix(report)
     files = []
     rows = headline_rows(report, score, rule, 1)
     fig, ax = plt.subplots(figsize=(7, 4))
@@ -564,6 +873,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--exclude_from_calibration", nargs="*", default=["D-FA"], help="gold classes kept out of "
                                                                                          "calibration")
+    parser.add_argument("--prior", choices=["empirical", "prompt"], default="empirical",
+                        help="empirical: average posterior over the calibration users; prompt: the empty-data prompt")
+    parser.add_argument("--axis_order", choices=["both", "0", "1"], default="both",
+                        help="axis_questions runs: average both letter orders, or use one")
     parser.add_argument("--rf", action="store_true", help="add the random-forest baseline (needs --tasks, sklearn)")
     parser.add_argument("--no_plots", action="store_true")
     parser.add_argument("--no_save", action="store_true", help="print only")
@@ -578,7 +891,8 @@ def main(argv: list[str] | None = None) -> list[dict[str, Any]]:
     reports = []
     for path in args.predictions:
         report = analyze_wqa(Path(path).expanduser().resolve(), args.alpha, args.k, args.score, args.conformal_rule,
-                             args.splits, args.seed, tuple(args.exclude_from_calibration), tasks, args.rf)
+                             args.splits, args.seed, tuple(args.exclude_from_calibration), tasks, args.rf,
+                             args.prior, args.axis_order)
         print(format_wqa_report(report, args.score[0], args.conformal_rule[0]))
         if not args.no_save:
             print(f"\nSaved {save_wqa_report(report)}")

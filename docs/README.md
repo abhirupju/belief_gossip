@@ -336,4 +336,34 @@ data can answer, and its answer is spread evenly over the four classes.
 bash bluebear/submit_wqa.sh --model Qwen/Qwen3.5-2B --variant axis_questions
 bash bluebear/submit_wqa.sh --model Qwen/Qwen3.5-4B --variant axis_questions
 python src/analyze_wqa.py --predictions results/<run>/predictions_wqa_axis_questions_N75.json --tasks data/wearableqa/tasks.jsonl
+python src/analyze_wqa.py --predictions results/<run>/predictions_wqa_axis_questions_N75.json --tasks data/wearableqa/tasks.jsonl --axis_order 0
 ```
+
+### 11b. Prior used for lift (`--prior`)
+
+The prompted prior (empty-data prompt) is not neutral: "No data from this device" reads as evidence of low
+fitness / an adverse profile (Qwen3.5-4B watch: p(low) = 0.99), so lift points to "favourable" on almost every task.
+
+| `--prior` | Prior of each agent | Used for |
+|---|---|---|
+| `empirical` (default) | its average posterior over the calibration users of each split, all their tasks, no labels | lift and margin scores in the conformal sets |
+| `prompt` | the empty-data prompt, as scored in the run | comparison with earlier reports |
+
+The F1 table always shows both: `argmax_lift` (prompted prior) and `argmax_lift_empirical` (average posterior over
+all tasks of that agent). Non-default settings are added to the output names, e.g.
+`analysis_wqa_axis_questions_N75_prior-empirical_order-0.json`.
+
+### 11c. Set constructions: standard, structured, classwise
+
+`analyze_wqa.py` reports three kinds of sets over the same user-grouped splits (half the users calibrate, the other
+half test). D-FA has 3 questions in all, so it is listed apart in every table.
+
+| Method | Calibration | Guarantee | Role |
+|---|---|---|---|
+| standard (`conformal`) | one threshold, D-FA kept out | marginal over CH, CA, D-LF (`cov_cal`) | as before |
+| structured (`structured`, axis_questions runs) | each judgement per side at α/2, by the agents that answer it; all classes | each side ≥ 1 − α/2, class set ≥ 1 − α | main result |
+| classwise (`classwise`) | one threshold per class; all classes | each class ≥ 1 − α; a class with < 1/α − 1 calibration questions is always kept | conservative bound |
+
+Structured groups: `fusion_no_ring` (fitness: watch + phone; metabolic: both clinics), `fusion_with_ring`,
+`watch_and_clinics` (fitness from the watch alone), `centralised_axis` (its two answers). All use the joint rule at
+k = 1 and the prior chosen with `--prior`.

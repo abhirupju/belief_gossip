@@ -161,3 +161,120 @@ def test_f1_per_label():
     assert f1["a"] == pytest.approx(2 / 3)                 # P 1, R 1/2
     assert f1["b"] == pytest.approx(1 / 2)                 # P 1/2, R 1/2 (unparsed counts as a miss)
     assert f1["macro"] == pytest.approx(7 / 12)
+
+
+def test_mean_log_distribution():
+    mean = aw.mean_log_distribution([{"a": math.log(0.9), "b": math.log(0.1)}, {"a": math.log(0.5), "b": math.log(0.5)}])
+    assert math.exp(mean["a"]) == pytest.approx(0.7) and math.exp(mean["b"]) == pytest.approx(0.3)
+
+
+def test_empirical_prior_views():
+    def view(user, p):
+        posterior = {"A": math.log(p), "B": math.log(1 - p)}
+        return {"user_id": user, "agents": [{"prior": {"A": math.log(0.99), "B": math.log(0.01)},
+                                             "posterior": posterior, "lift": {}}]}
+    views = [view("u1", 0.8), view("u2", 0.4), view("u3", 0.1)]
+    out = aw.empirical_prior_views(views, {"u1", "u2"})
+    prior = out[0]["agents"][0]["prior"]
+    assert math.exp(prior["A"]) == pytest.approx(0.6)                      # mean of 0.8 and 0.4; u3 unused
+    assert all(v["agents"][0]["prior"] == prior for v in out)
+    assert out[2]["agents"][0]["lift"]["A"] == pytest.approx(math.log(0.1) - math.log(0.6))
+    assert views[0]["agents"][0]["prior"]["A"] == pytest.approx(math.log(0.99))   # input untouched
+
+
+def test_axis_order_and_empirical_prior_analysis(wqa_config, wqa_paths, make_loader):
+    loader, _ = make_loader(axis_reply)
+    config = copy.deepcopy(wqa_config)
+    config["prompts"]["variant"] = "axis_questions"
+    summary = wqa_exp.run_wqa_experiment(config, wqa_paths, loader_fn=loader, download=False)
+    path = Path(summary["files"]["predictions"])
+    records = json.loads(path.read_text(encoding="utf-8"))
+    priors = json.loads(aw.priors_path_for(path).read_text(encoding="utf-8"))
+    for order in (0, 1):
+        rebuilt = aw.records_at_axis_order(records, priors, order)
+        watch = next(r for r in rebuilt if r["agent_id"] == "watch")
+        scores = watch["option_logprobs_by_order"][order]
+        favourable = scores["A"] if order == 0 else scores["B"]
+        total = math.log(math.exp(scores["A"]) + math.exp(scores["B"]))
+        assert watch["option_logprobs_axis_posterior"]["favourable"] == pytest.approx(favourable - total)
+        assert sum(math.exp(v) for v in watch["option_logprobs_posterior"].values()) == pytest.approx(1.0)
+        central = next(r for r in rebuilt if r["agent_id"] == "centralised_axis")
+        assert central["option_logprobs_posterior"] == wqa_exp.classes_from_both_axes(
+            central["axes"]["fitness"]["option_logprobs_axis_posterior"],
+            central["axes"]["metabolic"]["option_logprobs_axis_posterior"])
+        assert next(r for r in rebuilt if r["agent_id"] == "centralised") == next(
+            r for r in records if r["agent_id"] == "centralised")
+    tasks = wqa_prepare.load_tasks(wqa_paths["tasks"])
+    report = aw.analyze_wqa(path, [0.2], [1], ["lift"], ["joint"], n_splits=5, tasks=tasks, axis_order="1")
+    assert report["settings"] == dict(report["settings"], prior="empirical", axis_order="1")
+    assert all(r["prior"] == "empirical" for results in report["conformal"].values() for r in results)
+    assert "argmax_lift_empirical" in report["f1"]["watch"]["own_axis"]
+    assert "argmax_lift_empirical" in report["f1"]["centralised"]["per_class"]
+    assert aw.save_wqa_report(report).name.endswith("_prior-empirical_order-1.json")
+    prompt = aw.analyze_wqa(path, [0.2], [1], ["lift"], ["joint"], n_splits=5, prior="prompt")
+    assert aw.report_suffix(prompt) == ""
+    with pytest.raises(AssertionError, match="not scored"):
+        single = [dict(r, option_logprobs_by_order=r["option_logprobs_by_order"][:1]) for r in records
+                  if "axis_question" in r]
+        aw.records_at_axis_order(single, priors, 1)
+
+
+def test_classwise_thresholds_and_sets():
+    score_fn = aw.get_score_functions()["lac"]
+
+    def view(true, p_a):
+        posterior = {"A": math.log(p_a), "B": math.log(1 - p_a)}
+        return {"true_letter": true, "letters": ["A", "B"],
+                "agents": [{"posterior": posterior, "prior": posterior, "lift": {"A": 0.0, "B": 0.0}}]}
+    calibration = [view("A", p) for p in (0.9, 0.8, 0.7, 0.6, 0.95, 0.85, 0.75, 0.65, 0.55, 0.99,
+                                          0.91, 0.81, 0.71, 0.61, 0.51, 0.92, 0.82, 0.72, 0.62)] + [view("B", 0.3)]
+    thresholds = aw.classwise_thresholds(calibration, score_fn, 0.1, 1)
+    assert thresholds["A"] == pytest.approx(1 - 0.55)          # rank ceil(20 x 0.9) = 18 of 19 scores
+    assert math.isinf(thresholds["B"])                          # B: 1 question < 1/0.1 - 1
+    assert aw.classwise_set(view("A", 0.4), score_fn, thresholds, 1) == ["B"]            # A excluded, B always kept
+    assert aw.classwise_set(view("A", 0.6), score_fn, thresholds, 1) == ["A", "B"]
+
+
+def test_classes_from_side_sets():
+    fixed = ws.fixed_letter_map()
+    assert aw.classes_from_side_sets(["favourable"], ["adverse"]) == [fixed["D-FA"]]
+    assert aw.classes_from_side_sets(["low"], ["favourable", "adverse"]) == sorted([fixed["CA"], fixed["D-LF"]])
+    assert aw.classes_from_side_sets([], ["adverse"]) == []
+
+
+def test_structured_and_classwise_report(wqa_config, wqa_paths, make_loader):
+    loader, _ = make_loader(axis_reply)
+    config = copy.deepcopy(wqa_config)
+    config["prompts"]["variant"] = "axis_questions"
+    summary = wqa_exp.run_wqa_experiment(config, wqa_paths, loader_fn=loader, download=False)
+    path = Path(summary["files"]["predictions"])
+    records = json.loads(path.read_text(encoding="utf-8"))
+    groups = aw.judgement_conditions(records)
+    assert groups["fusion_no_ring"] == {"fitness": ["watch", "phone"], "metabolic": ["clinic_glycaemic", "clinic_lipid"]}
+    assert groups["fusion_with_ring"]["fitness"] == ["watch", "phone", "ring"]
+    assert groups["watch_and_clinics"]["fitness"] == ["watch"]
+    assert groups["centralised_axis"]["metabolic"] == ["centralised_axis"]
+    views = aw.side_views(records, ["watch", "phone"], "fitness")
+    assert len(views) == 8 and all(v["letters"] == ["favourable", "low"] for v in views)
+    assert all(v["true_letter"] == aw.side_of(v["gold_class"], "fitness") for v in views)
+    with pytest.raises(AssertionError, match="did not answer"):
+        aw.side_views(records, ["watch"], "metabolic")
+    report = aw.analyze_wqa(path, [0.2], [1], ["lac"], ["joint"], n_splits=10)
+    assert set(report["structured"]) == set(groups) and set(report["classwise"]) == set(report["conditions"])
+    result = report["structured"]["fusion_no_ring"]["results"][0]
+    assert result["alpha_per_judgement"] == pytest.approx(0.1)
+    assert set(result["per_side"]) == {"fitness", "metabolic"} and "D-FA" in result["per_class"]
+    assert all(0.0 <= result["metrics"][m]["mean"] for m in ("coverage", "mean_set_size"))
+    classwise = report["classwise"]["fusion_no_ring"][0]
+    assert classwise["infinite_threshold_share"]["D-FA"] == 1.0          # 1 D-FA question: never calibratable
+    assert classwise["per_class"]["D-FA"]["coverage"] == 1.0
+    text = aw.format_wqa_report(report, "lac", "joint")
+    assert "structured conformal" in text and "classwise conformal" in text and "D-FA" in text
+
+
+def test_no_structured_sets_without_axis_questions(wqa_config, wqa_paths, make_loader):
+    loader, _ = make_loader(lambda text: "A")
+    summary = wqa_exp.run_wqa_experiment(copy.deepcopy(wqa_config), wqa_paths, num_samples=4, loader_fn=loader,
+                                         download=False)
+    records = json.loads(Path(summary["files"]["predictions"]).read_text(encoding="utf-8"))
+    assert aw.judgement_conditions(records) == {}
