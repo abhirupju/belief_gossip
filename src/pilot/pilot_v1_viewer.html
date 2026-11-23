@@ -1,0 +1,165 @@
+<title>HiddenBench Agent Prompts</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: sticky nav bar with prev/next, then task facts, then one collapsible card per agent. */
+:root {
+  --bg: #f6f7f9; --surface: #ffffff; --fg: #1d232b; --muted: #5d6875; --line: #d9dee5;
+  --accent: #2856b8; --mark: #fff1b8; --good: #1d7a46; --bad: #b8322a; --bar: #c9d6f2; --bar-true: #9fd3b4;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #12161b; --surface: #1b2128; --fg: #e3e8ee; --muted: #97a3b0; --line: #2e3742;
+  --accent: #7aa2f0; --mark: #4a4120; --good: #5cc98a; --bad: #f07a70; --bar: #2f4672; --bar-true: #2c6447; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #12161b; --surface: #1b2128; --fg: #e3e8ee; --muted: #97a3b0; --line: #2e3742;
+  --accent: #7aa2f0; --mark: #4a4120; --good: #5cc98a; --bad: #f07a70; --bar: #2f4672; --bar-true: #2c6447; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 15px/1.55 var(--sans); }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--surface); }
+.wrap { max-width: 960px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 0 48px; }
+nav { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--surface); border-bottom: 1px solid var(--line); }
+nav .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding-block: 10px; }
+nav h1 { font-size: 15px; font-weight: 600; margin: 0; flex: 1 1 auto; text-wrap: balance; }
+nav .count { font: 13px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+button { font: 600 14px var(--sans); color: var(--accent); background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 6px 14px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:disabled { color: var(--muted); cursor: default; opacity: .5; }
+select { font: 13px var(--mono); color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 5px 6px; max-width: 100%; }
+main { display: grid; gap: 20px; padding-top: 20px; }
+h2 { font-size: 20px; margin: 0; text-wrap: balance; }
+h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 6px; }
+.answer { color: var(--good); font-weight: 600; }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.facts > div { min-width: 0; }
+ol { margin: 0; padding-left: 0; list-style: none; display: grid; gap: 6px; }
+ol li { display: grid; grid-template-columns: 2.2em 1fr; }
+ol li span { font: 12px/1.9 var(--mono); color: var(--muted); }
+.cards { display: grid; gap: 8px; }
+details { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; min-width: 0; }
+summary { cursor: pointer; font-weight: 600; }
+summary .idx { font: 13px var(--mono); color: var(--muted); font-weight: 400; margin-left: 8px; }
+h4 { font: 500 12px var(--mono); color: var(--muted); margin: 12px 0 4px; text-transform: uppercase; letter-spacing: .06em; }
+pre { font: 13px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; padding: 12px; background: var(--bg); border-radius: 6px; }
+mark { background: var(--mark); color: inherit; }
+.hint { font-size: 13px; color: var(--muted); margin: 0; }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; }
+.stat { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; font-size: 13px; }
+.stat b { display: block; font-size: 14px; margin-bottom: 4px; }
+.stat .num { font: 13px var(--mono); font-variant-numeric: tabular-nums; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
+th { font-weight: 600; color: var(--muted); font-size: 12px; }
+th.true { color: var(--good); }
+td.num, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.cell { display: grid; gap: 2px; min-width: 96px; }
+.bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--bar); }
+.bar.true > i { background: var(--bar-true); }
+.up { color: var(--good); } .down { color: var(--bad); }
+.chip { font: 600 12px var(--mono); padding: 1px 7px; border-radius: 10px; border: 1px solid currentColor; }
+.probs { margin-top: 10px; }
+</style>
+
+<nav><div class="wrap">
+  <h1>HiddenBench agent prompts</h1>
+  <select id="jump" aria-label="Jump to sample"></select>
+  <span class="count" id="count"></span>
+  <button id="prev" type="button">&larr; Prev</button>
+  <button id="next" type="button">Next &rarr;</button>
+</div></nav>
+<div class="wrap"><main id="view"></main></div>
+
+<script id="data" type="application/json">/*DATA*/</script>
+<script>
+const samples = JSON.parse(document.getElementById("data").textContent);
+const view = document.getElementById("view"), jump = document.getElementById("jump");
+let pos = 0;
+
+function esc(s) { return s.replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"})[c]); }
+function factList(items) { return "<ol>" + items.map((f, i) => `<li><span>${i}</span><div>${esc(f)}</div></li>`).join("") + "</ol>"; }
+function highlight(text, hidden) {
+  return text.split("\n").map(line => {
+    const fact = line.startsWith("- ") ? line.slice(2) : null;
+    return fact !== null && hidden.includes(fact) ? `<mark>${esc(line)}</mark>` : esc(line);
+  }).join("\n");
+}
+
+const fmt = (v, d = 3) => v.toFixed(d);
+const signed = (v, d = 3) => (v >= 0 ? "+" : "") + v.toFixed(d);
+const cls = v => v > 0.0005 ? "up" : v < -0.0005 ? "down" : "";
+const kind = id => id === "no-private" || id === "all-facts" ? id : "one fact";
+function chip(a, s) {
+  if (a.letter === null) return `<span class="chip down">no letter</span>`;
+  return `<span class="chip ${a.letter === s.true_letter ? "up" : "down"}">${a.letter}</span>`;
+}
+function probCell(a, s, k) {
+  const p = a.probs[k], d = a.delta_p[k];
+  return `<div class="cell"><span class="num">${fmt(p)} <span class="${cls(d)}">${a.agent_id === "no-private" ? "" : signed(d)}</span></span>
+    <div class="bar${k === s.true_letter ? " true" : ""}"><i style="width:${(p * 100).toFixed(1)}%"></i></div></div>`;
+}
+function probTable(s, agents) {
+  const ks = Object.keys(s.options);
+  const head = ks.map(k => `<th class="${k === s.true_letter ? "true" : ""}">${k}. ${esc(s.options[k])}${k === s.true_letter ? " (true)" : ""}</th>`).join("");
+  const rows = agents.map(a => `<tr><td>${esc(a.agent_id)}</td><td class="num">[${a.fact_indices.join(", ")}]</td>
+    ${ks.map(k => `<td>${probCell(a, s, k)}</td>`).join("")}
+    <td class="num ${cls(a.true_lift)}">${a.agent_id === "no-private" ? "&mdash;" : signed(a.true_lift)}</td><td>${chip(a, s)}</td></tr>`).join("");
+  return `<div class="scroll"><table><thead><tr><th>Agent</th><th>Facts</th>${head}<th>Lift (true)</th><th>Reply</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+function summary() {
+  const groups = {"no-private": [], "one fact": [], "all-facts": []};
+  samples.forEach(s => s.agents.forEach(a => groups[kind(a.agent_id)].push({a, s})));
+  return Object.entries(groups).map(([name, xs]) => {
+    const n = xs.length, mean = f => xs.reduce((t, x) => t + f(x), 0) / n;
+    const acc = mean(({a, s}) => Object.entries(a.probs).sort((x, y) => y[1] - x[1])[0][0] === s.true_letter ? 1 : 0);
+    const extra = name === "no-private" ? "baseline" :
+      `mean lift <span class="${cls(mean(x => x.a.true_lift))}">${signed(mean(x => x.a.true_lift))}</span> &middot; ` +
+      `mean &Delta;p(true) ${signed(mean(x => x.a.delta_p[x.s.true_letter]))} &middot; lift&gt;0 in ${fmt(mean(x => x.a.true_lift > 0 ? 1 : 0), 2)}`;
+    return `<div class="stat"><b>${name} <span class="hint">(${n} prompts)</span></b>
+      <span class="num">accuracy ${fmt(acc)}</span><br><span class="num">${extra}</span></div>`;
+  }).join("");
+}
+
+function render() {
+  const s = samples[pos];
+  const cards = s.agents.map(a => `<details>
+      <summary>${esc(a.agent_id)}<span class="idx">hidden facts [${a.fact_indices.join(", ")}]</span>
+        <span class="idx">reply ${esc(JSON.stringify(a.reply))}</span> ${chip(a, s)}
+        ${a.agent_id === "no-private" ? "" : `<span class="idx ${cls(a.true_lift)}">lift ${signed(a.true_lift)}</span>`}</summary>
+      <div class="probs">${probTable(s, [a])}</div>
+      ${a.messages.map(m => `<h4>${esc(m.role)}</h4><pre>${highlight(m.text, s.hidden)}</pre>`).join("")}
+    </details>`).join("");
+  view.innerHTML = `<div><h3>All ${samples.length} samples</h3><div class="summary">${summary()}</div></div>
+    <div><h2>[${s.id}] ${esc(s.name)}</h2>
+      <p>True answer: <span class="answer">${esc(s.true_letter)}. ${esc(s.correct_answer)}</span></p></div>
+    <div class="facts"><div><h3>Shared facts</h3>${factList(s.shared)}</div>
+      <div><h3>Hidden facts</h3>${factList(s.hidden)}</div></div>
+    <div><h3>Option probabilities</h3><p class="hint">Probability of each option at the first answer token, renormalized over the options. Signed numbers are the change from the no-private prompt; lift is the change in log p of the true option.</p></div>
+    ${probTable(s, s.agents)}
+    <div><h3>Agent prompts</h3><p class="hint">Highlighted lines are hidden facts. Arrow keys move between samples.</p></div>
+    <div class="cards">${cards}</div>`;
+  document.getElementById("count").textContent = `${pos + 1} / ${samples.length}`;
+  document.getElementById("prev").disabled = pos === 0;
+  document.getElementById("next").disabled = pos === samples.length - 1;
+  jump.value = String(pos);
+  if (location.hash !== "#s" + s.id) history.replaceState(null, "", "#s" + s.id);
+}
+
+function go(i) { pos = Math.max(0, Math.min(samples.length - 1, i)); render(); window.scrollTo(0, 0); }
+function fromHash() { const i = samples.findIndex(s => "#s" + s.id === location.hash); return i < 0 ? 0 : i; }
+
+jump.innerHTML = samples.map((s, i) => `<option value="${i}">${s.id}. ${esc(s.name)}</option>`).join("");
+jump.addEventListener("change", () => go(Number(jump.value)));
+document.getElementById("prev").addEventListener("click", () => go(pos - 1));
+document.getElementById("next").addEventListener("click", () => go(pos + 1));
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT") return;
+  if (e.key === "ArrowLeft") go(pos - 1);
+  if (e.key === "ArrowRight") go(pos + 1);
+});
+window.addEventListener("hashchange", () => { const i = fromHash(); if (i !== pos) go(i); });
+pos = fromHash();
+render();
+</script>
